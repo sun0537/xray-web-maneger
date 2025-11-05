@@ -32,12 +32,20 @@ xray:
 ```
 访问浏览器http://<服务器IP>:端口
 
-Xray 配置要求，修改xray的配置文件：  
-添加 api 配置模块开启接口；  
-添加 stats 模块开启统计；  
-添加 policy 开启系统流量统计；  
-添加 burstObservatory 模块开启连接观测，使用 HTTPing 的方式探测出站代理的连接状态；  
-route 模块中添加负载均衡器配置，代理出站不使用 outboundTag 使用 balancerTag 指定负载均衡器的 tag
+## 项目截图
+
+![我的项目截图](./assets/image.png)
+
+依赖 Xray 的 gRPC API 和 routing.balancers 路由功能，确保 Xray config.json 中包含以下配置：  
+- 添加 api 配置模块开启接口；  
+  
+- 添加 stats 模块开启统计；  
+- 添加 policy 开启系统流量统计；  
+- 添加 burstObservatory 模块开启连接观测，使用 HTTPing 的方式探测出站代理的连接状态；  
+- route 模块中添加负载均衡器配置，代理出站不使用 outboundTag 使用 balancerTag 指定负载均衡器的 tag
+<details>
+<summary>Xray 配置示例</summary>
+
 ```json
 {
     "api": {
@@ -132,4 +140,4 @@ route 模块中添加负载均衡器配置，代理出站不使用 outboundTag �
     }
 }
 ```
-
+</details>
