@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xray 节点管理</title>
+    <!-- <script src="https://cdn.tailwindcss.com"></script> -->
+    <link href="./style.css" rel="stylesheet">
+    <style>
+        body { 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .card-hover {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            cursor: pointer;
+        }
+        .card-hover:hover:not(.current-indicator) {
+            transform: translateY(-4px);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);
+        }
+        .card-hover:active:not(.current-indicator) {
+            transform: translateY(-2px);
+        }
+        .pulse-ring {
+            animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse-ring {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .current-indicator {
+            animation: glow 2s ease-in-out infinite;
+        }
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 0 15px rgba(34, 211, 238, 0.5); }
+            50% { box-shadow: 0 0 25px rgba(34, 211, 238, 0.8); }
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="container max-w-6xl mx-auto">
+        <div class="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 shadow-2xl border border-white/20">
+            <h1 class="text-4xl font-bold text-white mb-2 flex items-center gap-3">
+                <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                </svg>
+                Xray 节点管理
+            </h1>
+            <p class="text-white/80 text-sm">均衡器: <code id="balancer-tag" class="bg-white/20 text-cyan-200 px-3 py-1 rounded-lg font-mono">加载中...</code></p>
+            
+            <div id="current-status" class="mt-4 p-4 bg-white/10 rounded-xl border border-white/20">
+                <div class="flex items-center justify-between">
+                    <span class="text-white/70">当前出站:</span>
+                    <span id="current-tag" class="font-mono text-xl text-cyan-300 font-bold">加载中...</span>
+                </div>
+            </div>
+
+            <div id="stats-container" class="mt-4 p-4 bg-white/10 rounded-xl border border-white/20 text-white/70">
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+                    <div>
+                        <div>总上传 <span class="text-xs">(In)</span></div>
+                        <div id="stats-uplink" class="font-mono text-lg text-white font-bold">加载中...</div>
+                    </div>
+                    <div>
+                        <div>总下载 <span class="text-xs">(In)</span></div>
+                        <div id="stats-downlink" class="font-mono text-lg text-white font-bold">加载中...</div>
+                    </div>
+                    <div>
+                        <div>运行时间</div>
+                        <div id="stats-uptime" class="font-mono text-lg text-white font-bold">加载中...</div>
+                    </div>
+                    <div>
+                        <div>系统内存</div>
+                        <div id="stats-sys-mem" class="font-mono text-lg text-white font-bold">加载中...</div>
+                    </div>
+                    <div>
+                        <div>Goroutines</div>
+                        <div id="stats-goroutines" class="font-mono text-lg text-white font-bold">加载中...</div>
+                    </div>
+                </div>
+            </div>
+            </div>
+
+        <div class="bg-white/10 backdrop-blur-lg rounded-2xl p-6 shadow-2xl border border-white/20">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-2xl font-bold text-white flex items-center gap-2">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+                    </svg>
+                    可用节点
+                </h2>
+                <button id="refresh-btn" class="bg-white/20 hover:bg-white/30 text-white px-4 py-2 rounded-lg transition duration-200 flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                    </svg>
+                    刷新
+                </button>
+            </div>
+            
+            <div id="outbounds-list" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                <div class="text-white/70 text-center py-8 col-span-full">
+                    <svg class="animate-spin h-8 w-8 mx-auto mb-2" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    正在加载节点...
+                </div>
+            </div>
+
+            <div class="mt-6 pt-6 border-t border-white/20">
+                <button id="reset-btn" class="w-full bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white font-bold py-3 px-6 rounded-xl transition duration-200 shadow-lg flex items-center justify-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                    </svg>
+                    重置为自动均衡
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
