@@ -135,22 +135,24 @@ async function initializePage() {
     // 3. 立即渲染骨架卡片
     renderOutboundCards(orderedNodeData);
 
-    // 4. 异步加载所有节点的状态 (会一个一个更新 UI)
-    const allStatuses = await progressiveLoadStatuses(orderedNodeData);
+    setTimeout(async () => {
+        // 4. 异步加载所有节点的状态 (会一个一个更新 UI)
+        const allStatuses = await progressiveLoadStatuses(orderedNodeData);
 
-    // 5. 自动切换逻辑 (现在可以安全运行)
-    const bestNode = findBestNode(allStatuses);
-    if (bestNode && currentStatus.auto && !didInitialAutoSelect) {
-        console.log(`自动切换到最佳节点: ${bestNode.tag} (延迟: ${bestNode.status.delay}ms)`);
-        didInitialAutoSelect = true;
-        await applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
-        
-        // 手动更新 UI，而不是重新渲染
-        await loadCurrentOutbound(); // 1. 重新获取 'currentOutbound' 变量
-        
-        // 重新渲染以正确更新 'current' 状态和点击事件
-        renderOutboundCards(orderedNodeData);
-    }
+        // 5. 自动切换逻辑 (现在可以安全运行)
+        const bestNode = findBestNode(allStatuses);
+        if (bestNode && currentStatus.auto && !didInitialAutoSelect) {
+            console.log(`自动切换到最佳节点: ${bestNode.tag} (延迟: ${bestNode.status.delay}ms)`);
+            didInitialAutoSelect = true;
+            await applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
+            
+            // 手动更新 UI，而不是重新渲染
+            await loadCurrentOutbound(); // 1. 重新获取 'currentOutbound' 变量
+            
+            // 重新渲染以正确更新 'current' 状态和点击事件
+            renderOutboundCards(orderedNodeData);
+        }
+    }, 0);
 }
 
 
@@ -252,8 +254,18 @@ async function progressiveLoadStatuses(nodes) {
 //  更新单个卡片的状态
 function updateCardStatus(tag, status) {
     const statusEl = document.getElementById(`status-${tag}`);
-    if (!statusEl) return; // 卡片可能不存在
+    if (!statusEl) {
+        // 如果没找到，可能是 DOM 还没渲染完，尝试在 50ms 后重试一次
+        setTimeout(() => {
+            const retryEl = document.getElementById(`status-${tag}`);
+            if (retryEl) performUIUpdate(retryEl, status);
+        }, 50);
+        return;
+    }
 
+    performUIUpdate(statusEl, status);
+}
+function performUIUpdate(statusEl, status) {
     let statusHTML = '';
     if (status && status.error !== 'not_found' && status.error !== 'fetch_failed') {
         const alive = status.alive;
@@ -262,20 +274,18 @@ function updateCardStatus(tag, status) {
         const statusColor = alive ? 'text-green-400' : 'text-red-400';
         
         statusHTML = `
-            <span class="flex h-2 w-2">
+            <span class="flex h-2 w-2 relative">
                 <span class="animate-ping absolute inline-flex h-2 w-2 rounded-full ${color} opacity-75"></span>
                 <span class="relative inline-flex rounded-full h-2 w-2 ${color}"></span>
             </span>
             <span class="font-mono font-semibold">${delay} ms</span>`;
         statusEl.className = `flex items-center gap-2 text-xs ${statusColor}`;
     } else {
-        statusHTML = '<span>&#9675; 未知</span>';
+        statusHTML = '<span>&#9675; 检测失败</span>';
         statusEl.className = 'flex items-center gap-2 text-xs text-white/70';
     }
-    
     statusEl.innerHTML = statusHTML;
 }
-
 // findBestNode 接收 {tag, status} 列表
 function findBestNode(allStatuses) {
     let bestNode = null;
