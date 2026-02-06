@@ -45,7 +45,7 @@ function connectStatsSSE() {
     
     evtSource.onopen = () => {
         console.log("SSE 连接已建立");
-        //当连接重新建立时，重置 UI 状态
+        //当连接重新建立时,重置 UI 状态
         updateStatsUI(null, true); // 传递一个 "reset" 标志
     };
 
@@ -58,14 +58,14 @@ function connectStatsSSE() {
         document.getElementById('stats-sys-mem').textContent = errorText;
         document.getElementById('stats-goroutines').textContent = errorText;
         
-        // 浏览器原生的 EventSource 会自动尝试重连，不需要自己写。
-        // 它会在连接失败时自动进入“重连中”状态。
+        // 浏览器原生的 EventSource 会自动尝试重连,不需要自己写。
+        // 它会在连接失败时自动进入"重连中"状态。
     };
 }
 
 function updateStatsUI(data, reset = false) {
     if (reset) {
-        // 如果是重置调用 (onopen)，恢复 "加载中..."
+        // 如果是重置调用 (onopen),恢复 "加载中..."
         // 这可以清除 "统计数据连接断开" 的提示
         const loadingText = "加载中...";
         document.getElementById('stats-uplink').textContent = loadingText;
@@ -99,6 +99,7 @@ async function loadConfig() {
     }
     await initializePage();
 }
+
 
 async function initializePage() {
     // 1. 获取当前状态
@@ -135,24 +136,25 @@ async function initializePage() {
     // 3. 立即渲染骨架卡片
     renderOutboundCards(orderedNodeData);
 
-    setTimeout(async () => {
-        // 4. 异步加载所有节点的状态 (会一个一个更新 UI)
-        const allStatuses = await progressiveLoadStatuses(orderedNodeData);
+    // 4. 异步加载所有节点的状态 (会一个一个更新 UI)
+    const allStatuses = await progressiveLoadStatuses(orderedNodeData);
 
-        // 5. 自动切换逻辑 (现在可以安全运行)
-        const bestNode = findBestNode(allStatuses);
-        if (bestNode && currentStatus.auto && !didInitialAutoSelect) {
-            console.log(`自动切换到最佳节点: ${bestNode.tag} (延迟: ${bestNode.status.delay}ms)`);
-            didInitialAutoSelect = true;
-            await applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
-            
-            // 手动更新 UI，而不是重新渲染
-            await loadCurrentOutbound(); // 1. 重新获取 'currentOutbound' 变量
-            
-            // 重新渲染以正确更新 'current' 状态和点击事件
-            renderOutboundCards(orderedNodeData);
-        }
-    }, 0);
+    // 5. 自动切换逻辑 (现在可以安全运行)
+    const bestNode = findBestNode(allStatuses);
+    if (bestNode && currentStatus.auto && !didInitialAutoSelect) {
+        console.log(`自动切换到最佳节点: ${bestNode.tag} (延迟: ${bestNode.status.delay}ms)`);
+        didInitialAutoSelect = true;
+        await applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
+        
+        // 手动更新 UI,而不是重新渲染
+        await loadCurrentOutbound(); // 1. 重新获取 'currentOutbound' 变量
+        
+        // 重新渲染以正确更新 'current' 状态和点击事件
+        renderOutboundCards(orderedNodeData);
+        
+        // 重新加载状态以更新卡片显示
+        await progressiveLoadStatuses(orderedNodeData);
+    }
 }
 
 
@@ -238,8 +240,8 @@ async function progressiveLoadStatuses(nodes) {
             statusData.status = { alive: false, delay: 0, error: e.message };
         }
         
-        // 2. 只要 *这一个* fetch 完成了，就 *立即* 更新它对应的 UI 卡片。
-        //    这实现了“渐进式加载”的视觉效果。
+        // 2. 只要 *这一个* fetch 完成了,就 *立即* 更新它对应的 UI 卡片。
+        //    这实现了"渐进式加载"的视觉效果。
         updateCardStatus(node.tag, statusData.status);
         
         // 3. 返回数据给 Promise.all
@@ -247,7 +249,7 @@ async function progressiveLoadStatuses(nodes) {
     });
     
     // 4. 等待 *所有* 的 promise (无论成功或失败) 都执行完毕。
-    //    这保证了在运行 findBestNode 之前，已经拥有了所有节点的状态。
+    //    这保证了在运行 findBestNode 之前,已经拥有了所有节点的状态。
     return await Promise.all(statusPromises);
 }
 
@@ -255,10 +257,18 @@ async function progressiveLoadStatuses(nodes) {
 function updateCardStatus(tag, status) {
     const statusEl = document.getElementById(`status-${tag}`);
     if (!statusEl) {
-        // 如果没找到，可能是 DOM 还没渲染完，尝试在 50ms 后重试一次
+        // 增加重试次数和延迟,确保 DOM 渲染完成
         setTimeout(() => {
             const retryEl = document.getElementById(`status-${tag}`);
-            if (retryEl) performUIUpdate(retryEl, status);
+            if (retryEl) {
+                performUIUpdate(retryEl, status);
+            } else {
+                // 如果还是找不到,再重试一次
+                setTimeout(() => {
+                    const finalRetryEl = document.getElementById(`status-${tag}`);
+                    if (finalRetryEl) performUIUpdate(finalRetryEl, status);
+                }, 100);
+            }
         }, 50);
         return;
     }
