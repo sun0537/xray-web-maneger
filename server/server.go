@@ -45,6 +45,7 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config", s.handleGetConfig)
 	mux.HandleFunc("/api/outbounds", s.handleGetOutbounds)
 	mux.HandleFunc("/api/outbound-status", s.handleGetOutboundStatus)
+	mux.HandleFunc("/api/outbounds-status", s.handleGetOutboundsStatus)
 	mux.HandleFunc("/api/current-outbound", s.handleGetCurrentOutbound)
 	mux.HandleFunc("/api/stats-sse", s.handleStatsSSE)
 	mux.HandleFunc("/api/switch-outbound", s.handleSwitchOutbound)

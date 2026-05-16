@@ -17,20 +17,46 @@ import (
 )
 
 const (
-	grpcTimeout          = 4 * time.Second  // gRPC 调用超时
-	sseUpdateInterval    = 2 * time.Second  // SSE 数据推送间隔
-	sseHeartbeatInterval = 15 * time.Second // SSE 心跳间隔
-	apiTimeout           = 5 * time.Second  // 适用于 http handler 的通用超时
+	grpcTimeout          = 4 * time.Second
+	sseUpdateInterval    = 2 * time.Second
+	sseHeartbeatInterval = 15 * time.Second
+	apiTimeout           = 5 * time.Second
 )
+
+var excludeProtocols = map[string]bool{
+	"loopback":  true,
+	"freedom":   true,
+	"dns":       true,
+	"blackhole": true,
+}
 
 type OutboundInfo struct {
 	Tag      string `json:"tag"`
 	Protocol string `json:"protocol"`
 }
 
-// handleGetConfig 返回前端所需的配置
+type OutboundStatusData struct {
+	Tag   string `json:"tag"`
+	Alive bool   `json:"alive"`
+	Delay int64  `json:"delay"`
+}
+
+type StatsData struct {
+	Uplink     int64                `json:"uplink"`
+	Downlink   int64                `json:"downlink"`
+	Uptime     int64                `json:"uptime"`
+	SysMem     uint64               `json:"sys_mem"`
+	Goroutines int                  `json:"goroutines"`
+	Outbounds  []OutboundStatusData `json:"outbounds,omitempty"`
+}
+
+type CurrentOutboundData struct {
+	Current string `json:"current"`
+	Auto    bool   `json:"auto"`
+}
+
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, map[string]interface{}{
+	jsonResponse(w, map[string]string{
 		"balancer_tag": s.config.Xray.BalancerTag,
 	}, http.StatusOK)
 }
@@ -45,56 +71,36 @@ func (s *Server) handleGetOutbounds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 更改为新结构
 	outbounds := make([]OutboundInfo, 0, len(resp.Outbounds))
 	for _, outbound := range resp.Outbounds {
-		if outbound.Tag != "" {
-			protocolName := parseProtocol(outbound.ProxySettings)
-			if isValidOutbound(protocolName) {
-				outboundInfo := OutboundInfo{
-					Tag:      outbound.Tag,
-					Protocol: protocolName,
-				}
-				outbounds = append(outbounds, outboundInfo)
-			}
+		if outbound.Tag == "" {
+			continue
+		}
+		protocolName := parseProtocol(outbound.ProxySettings)
+		if isValidOutbound(protocolName) {
+			outbounds = append(outbounds, OutboundInfo{
+				Tag:      outbound.Tag,
+				Protocol: protocolName,
+			})
 		}
 	}
 
 	jsonResponse(w, outbounds, http.StatusOK)
 }
 
-// (用于解析 ProxySettings 中的协议类型)
 func parseProtocol(settings *serial.TypedMessage) string {
-	protocolName := "unknown"
-
-	// *serial.TypedMessage 直接包含 Type 字符串。
-	// 格式: "xray.proxy.vmess.outbound.Config"
-	typeString := settings.Type
-	if typeString == "" {
-		return protocolName
+	if settings == nil || settings.Type == "" {
+		return "unknown"
 	}
-
-	// 按 "." 分割
-	parts := strings.Split(typeString, ".")
-
-	// 我们正数第三个部分 (e.g., "vmess", "freedom", "vless")
+	parts := strings.Split(settings.Type, ".")
 	if len(parts) > 2 {
-		protocolName = parts[2]
+		return parts[2]
 	}
-
-	return protocolName
+	return "unknown"
 }
 
 func isValidOutbound(protocolName string) bool {
-
-	// 排除系统标签
-	excludeTags := []string{"loopback", "freedom", "dns", "blackhole"}
-	for _, exclude := range excludeTags {
-		if strings.ToLower(protocolName) == exclude {
-			return false
-		}
-	}
-	return true
+	return !excludeProtocols[strings.ToLower(protocolName)]
 }
 
 func (s *Server) handleGetOutboundStatus(w http.ResponseWriter, r *http.Request) {
@@ -107,54 +113,49 @@ func (s *Server) handleGetOutboundStatus(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
 	defer cancel()
 
-	resp, err := s.observatoryClient.GetOutboundStatus(ctx, &observatorypb.GetOutboundStatusRequest{})
-	if err != nil {
-		jsonError(w, "无法获取出站状态 (gRPC): "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if resp.Status == nil || resp.Status.Status == nil {
-		jsonError(w, "观测结果为空或格式无效", http.StatusInternalServerError)
-		return
-	}
-
-	for _, status := range resp.Status.Status {
-		if status.OutboundTag == tag {
-			jsonResponse(w, status, http.StatusOK)
+	statuses := s.getAllOutboundStatuses(ctx)
+	for _, st := range statuses {
+		if st.Tag == tag {
+			jsonResponse(w, st, http.StatusOK)
 			return
 		}
 	}
 
 	log.Printf("未在观测结果中找到 tag: %s", tag)
-	jsonResponse(w, map[string]interface{}{"alive": false, "delay": 0, "tag": tag, "error": "not_found"}, http.StatusNotFound)
+	jsonResponse(w, OutboundStatusData{Tag: tag, Alive: false, Delay: 0}, http.StatusNotFound)
+}
+
+func (s *Server) handleGetOutboundsStatus(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
+	defer cancel()
+
+	statuses := s.getAllOutboundStatuses(ctx)
+	if statuses == nil {
+		statuses = []OutboundStatusData{}
+	}
+	jsonResponse(w, statuses, http.StatusOK)
 }
 
 func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
 	defer cancel()
 
-	req := &routingpb.GetBalancerInfoRequest{
+	resp, err := s.routingClient.GetBalancerInfo(ctx, &routingpb.GetBalancerInfoRequest{
 		Tag: s.config.Xray.BalancerTag,
-	}
-
-	resp, err := s.routingClient.GetBalancerInfo(ctx, req)
+	})
 	if err != nil {
-		jsonResponse(w, map[string]interface{}{"current": "", "auto": true}, http.StatusOK)
+		jsonResponse(w, CurrentOutboundData{Current: "", Auto: true}, http.StatusOK)
 		return
 	}
 
 	current := ""
 	auto := true
-
 	if resp.Balancer != nil && resp.Balancer.Override != nil && resp.Balancer.Override.Target != "" {
 		current = resp.Balancer.Override.Target
 		auto = false
 	}
 
-	jsonResponse(w, map[string]interface{}{
-		"current": current,
-		"auto":    auto,
-	}, http.StatusOK)
+	jsonResponse(w, CurrentOutboundData{Current: current, Auto: auto}, http.StatusOK)
 }
 
 func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
@@ -175,12 +176,10 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
 	defer cancel()
 
-	req := &routingpb.OverrideBalancerTargetRequest{
+	_, err := s.routingClient.OverrideBalancerTarget(ctx, &routingpb.OverrideBalancerTargetRequest{
 		BalancerTag: s.config.Xray.BalancerTag,
 		Target:      reqBody.OutboundTag,
-	}
-
-	_, err := s.routingClient.OverrideBalancerTarget(ctx, req)
+	})
 	if err != nil {
 		jsonError(w, "切换出站失败: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -190,7 +189,6 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -202,10 +200,8 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 注册 SSE 连接
 	conn, ctx := s.sseManager.Add(r.Context())
 	if conn == nil {
-		// 服务器正在关闭，拒绝新连接
 		jsonError(w, "Server is shutting down", http.StatusServiceUnavailable)
 		return
 	}
@@ -220,7 +216,6 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("SSE 客户端已连接，开始推送统计数据")
 
-	// 立即发送第一次数据
 	if err := s.sendStatsUpdate(ctx, w, flusher); err != nil {
 		log.Printf("发送初始统计数据失败: %v", err)
 		return
@@ -242,62 +237,70 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 
 		case <-ticker.C:
 			if err := s.sendStatsUpdate(ctx, w, flusher); err != nil {
-				if ctx.Err() != nil {
-				} else {
+				if ctx.Err() == nil {
 					log.Printf("发送统计数据失败: %v", err)
 				}
+				return
 			}
 		}
 	}
 }
 
-func (s *Server) getCombinedStats(ctx context.Context) (map[string]interface{}, error) {
-	var totalUplink int64 = 0
-	var totalDownlink int64 = 0
+func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
+	stats := StatsData{}
 
-	queryReq := &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false}
 	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
 
-	queryResp, err := s.statsClient.QueryStats(gCtx, queryReq)
+	queryResp, err := s.statsClient.QueryStats(gCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
 	if err != nil {
 		log.Printf("警告: QueryStats 失败: %v", err)
-		// 不返回错误，使用默认值继续
 	} else {
 		for _, stat := range queryResp.Stat {
 			if strings.HasSuffix(stat.Name, ">>>traffic>>>uplink") {
-				totalUplink += stat.Value
+				stats.Uplink += stat.Value
 			} else if strings.HasSuffix(stat.Name, ">>>traffic>>>downlink") {
-				totalDownlink += stat.Value
+				stats.Downlink += stat.Value
 			}
 		}
 	}
 
-	var sysUptime int64
-	var sysMem uint64
-	var sysGoroutines int
-
-	sysReq := &statspb.SysStatsRequest{}
-	gCtx2, cancel2 := context.WithTimeout(ctx, grpcTimeout)
-	defer cancel2()
-
-	sysResp, err := s.statsClient.GetSysStats(gCtx2, sysReq)
+	sysResp, err := s.statsClient.GetSysStats(gCtx, &statspb.SysStatsRequest{})
 	if err != nil {
 		log.Printf("警告: GetSysStats 失败: %v", err)
-		// 不返回错误，使用默认值
 	} else if sysResp != nil {
-		sysUptime = int64(sysResp.GetUptime())
-		sysMem = sysResp.GetSys()
-		sysGoroutines = int(sysResp.GetNumGoroutine())
+		stats.Uptime = int64(sysResp.GetUptime())
+		stats.SysMem = sysResp.GetSys()
+		stats.Goroutines = int(sysResp.GetNumGoroutine())
 	}
 
-	return map[string]interface{}{
-		"uplink":     totalUplink,
-		"downlink":   totalDownlink,
-		"uptime":     sysUptime,
-		"sys_mem":    sysMem,
-		"goroutines": sysGoroutines,
-	}, nil
+	stats.Outbounds = s.getAllOutboundStatuses(ctx)
+	return stats, nil
+}
+
+func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusData {
+	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
+	defer cancel()
+
+	resp, err := s.observatoryClient.GetOutboundStatus(gCtx, &observatorypb.GetOutboundStatusRequest{})
+	if err != nil {
+		log.Printf("警告: GetOutboundStatus 失败: %v", err)
+		return nil
+	}
+
+	if resp.Status == nil || resp.Status.Status == nil {
+		return nil
+	}
+
+	result := make([]OutboundStatusData, 0, len(resp.Status.Status))
+	for _, status := range resp.Status.Status {
+		result = append(result, OutboundStatusData{
+			Tag:   status.OutboundTag,
+			Alive: status.Alive,
+			Delay: status.Delay,
+		})
+	}
+	return result
 }
 
 func (s *Server) sendStatsUpdate(ctx context.Context, w http.ResponseWriter, flusher http.Flusher) error {

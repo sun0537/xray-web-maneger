@@ -46,22 +46,19 @@ var defaultConfig = Config{
 }
 
 func GetConfigPath(configPath string) (string, error) {
-	var finalConfigPath string
 	if configPath != "" {
-		// 1. 用户通过 -c 或 --config 指定了路径
 		log.Printf("信息: 正在使用标志指定的配置文件: %s", configPath)
-		finalConfigPath = configPath
-	} else {
-		// 2. 默认行为：查找程序同目录下的 config.yaml
-		exePath, err := os.Executable() // 获取可执行文件完整路径
-		if err != nil {
-			return "", fmt.Errorf("无法获取可执行文件路径: %w", err)
-		}
-		exeDir := filepath.Dir(exePath) // 获取可执行文件所在目录
-		finalConfigPath = filepath.Join(exeDir, "config.yaml")
-		log.Printf("信息: 未指定配置，使用默认路径: %s", finalConfigPath)
+		return configPath, nil
 	}
-	return finalConfigPath, nil
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("无法获取可执行文件路径: %w", err)
+	}
+	exeDir := filepath.Dir(exePath)
+	finalPath := filepath.Join(exeDir, "config.yaml")
+	log.Printf("信息: 未指定配置，使用默认路径: %s", finalPath)
+	return finalPath, nil
 }
 
 func LoadConfig(filename string) (Config, error) {
@@ -84,18 +81,10 @@ func LoadConfig(filename string) (Config, error) {
 	}
 
 	// 填充默认值
-	if config.Server.Host == "" {
-		config.Server.Host = defaultConfig.Server.Host
-	}
-	if config.Server.Port == "" {
-		config.Server.Port = defaultConfig.Server.Port
-	}
-	if config.Xray.ApiAddr == "" {
-		config.Xray.ApiAddr = defaultConfig.Xray.ApiAddr
-	}
-	if config.Xray.BalancerTag == "" {
-		config.Xray.BalancerTag = defaultConfig.Xray.BalancerTag
-	}
+	applyDefault(&config.Server.Host, defaultConfig.Server.Host)
+	applyDefault(&config.Server.Port, defaultConfig.Server.Port)
+	applyDefault(&config.Xray.ApiAddr, defaultConfig.Xray.ApiAddr)
+	applyDefault(&config.Xray.BalancerTag, defaultConfig.Xray.BalancerTag)
 
 	// 验证配置
 	if err := ValidateConfig(config); err != nil {
@@ -111,6 +100,13 @@ func LoadConfig(filename string) (Config, error) {
 	return config, nil
 }
 
+func applyDefault(field *string, defaultVal string) {
+	if *field == "" {
+		*field = defaultVal
+	}
+}
+
+// ValidateConfig 验证配置合法性
 func ValidateConfig(config Config) error {
 	// 验证端口号
 	port, err := strconv.Atoi(config.Server.Port)
@@ -146,7 +142,7 @@ func ValidateConfig(config Config) error {
 	return nil
 }
 
-// saveDefaultConfig 保存默认配置文件
+// SaveDefaultConfig 保存默认配置文件
 func SaveDefaultConfig(filename string) error {
 	data, err := yaml.Marshal(defaultConfig)
 	if err != nil {

@@ -8,7 +8,7 @@ import (
 
 type Connection interface {
 	Context() context.Context
-	Close() error
+	Close()
 }
 
 type Manager struct {
@@ -26,11 +26,10 @@ func (c *sseConnection) Context() context.Context {
 	return c.ctx
 }
 
-func (c *sseConnection) Close() error {
+func (c *sseConnection) Close() {
 	if c.cancel != nil {
 		c.cancel()
 	}
-	return nil
 }
 func NewManager() *Manager {
 	return &Manager{

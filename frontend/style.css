@@ -319,9 +319,6 @@
   .max-w-6xl {
     max-width: var(--container-6xl);
   }
-  .transform {
-    transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,);
-  }
   .animate-bounce {
     animation: var(--animate-bounce);
   }
@@ -571,10 +568,6 @@
     --tw-duration: 200ms;
     transition-duration: 200ms;
   }
-  .ease-in-out {
-    --tw-ease: var(--ease-in-out);
-    transition-timing-function: var(--ease-in-out);
-  }
   .hover\:bg-white\/30 {
     &:hover {
       @media (hover: hover) {
@@ -622,25 +615,43 @@
     }
   }
 }
-@property --tw-rotate-x {
-  syntax: "*";
-  inherits: false;
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
 }
-@property --tw-rotate-y {
-  syntax: "*";
-  inherits: false;
+.card-hover {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
 }
-@property --tw-rotate-z {
-  syntax: "*";
-  inherits: false;
+.card-hover:hover:not(.current-indicator) {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);
 }
-@property --tw-skew-x {
-  syntax: "*";
-  inherits: false;
+.card-hover:active:not(.current-indicator) {
+  transform: translateY(-2px);
 }
-@property --tw-skew-y {
-  syntax: "*";
-  inherits: false;
+.pulse-ring {
+  animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse-ring {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+.current-indicator {
+  animation: glow 2s ease-in-out infinite;
+}
+@keyframes glow {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(34, 211, 238, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(34, 211, 238, 0.8);
+  }
 }
 @property --tw-border-style {
   syntax: "*";
@@ -798,10 +809,6 @@
   syntax: "*";
   inherits: false;
 }
-@property --tw-ease {
-  syntax: "*";
-  inherits: false;
-}
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -826,11 +833,6 @@
 @layer properties {
   @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b)))) {
     *, ::before, ::after, ::backdrop {
-      --tw-rotate-x: initial;
-      --tw-rotate-y: initial;
-      --tw-rotate-z: initial;
-      --tw-skew-x: initial;
-      --tw-skew-y: initial;
       --tw-border-style: solid;
       --tw-gradient-position: initial;
       --tw-gradient-from: #0000;
@@ -866,7 +868,6 @@
       --tw-backdrop-saturate: initial;
       --tw-backdrop-sepia: initial;
       --tw-duration: initial;
-      --tw-ease: initial;
     }
   }
 }
