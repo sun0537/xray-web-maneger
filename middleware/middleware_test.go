@@ -90,7 +90,18 @@ func TestCheckOrigin(t *testing.T) {
 		assert.Equal(t, "OK", rr.Body.String())
 	})
 
-	// --- 用例 4: 配置为空时 (应跳过检查) ---
+	// --- 用例 4: 无 Origin / Referer (同源请求应放行) ---
+	t.Run("No Origin same-origin pass", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/switch", nil)
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code, "无 Origin 的同源请求应放行")
+		assert.Equal(t, "OK", rr.Body.String())
+	})
+
+	// --- 用例 5: 配置为空时 (应跳过检查) ---
 	t.Run("Empty config skips check", func(t *testing.T) {
 		emptyMiddleware := CheckOrigin([]string{})
 		emptyHandler := emptyMiddleware(okHandler)
