@@ -5,8 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-
-	"google.golang.org/grpc"
+	"time"
 
 	"xray-web-manager/config"
 	"xray-web-manager/sse"
@@ -15,9 +14,11 @@ import (
 	handlerpb "xray-web-manager/internal/xray-proto/app/proxyman/command"
 	routingpb "xray-web-manager/internal/xray-proto/app/router/command"
 	statspb "xray-web-manager/internal/xray-proto/app/stats/command"
+
+	"google.golang.org/grpc"
 )
 
-// Server 结构体现在持有配置和 SSE 管理器
+// Server 结构体现在持有配置、SSE 管理器和启动时间
 type Server struct {
 	config            config.Config
 	handlerClient     handlerpb.HandlerServiceClient
@@ -25,10 +26,11 @@ type Server struct {
 	observatoryClient observatorypb.ObservatoryServiceClient
 	statsClient       statspb.StatsServiceClient
 	sseManager        *sse.Manager
+	startTime         time.Time
 }
 
 // NewServer 是一个构造函数，用于创建 Server 实例
-func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager) *Server {
+func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, startTime time.Time) *Server {
 	return &Server{
 		config:            cfg,
 		handlerClient:     handlerpb.NewHandlerServiceClient(conn),
@@ -36,12 +38,14 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager) *S
 		observatoryClient: observatorypb.NewObservatoryServiceClient(conn),
 		statsClient:       statspb.NewStatsServiceClient(conn),
 		sseManager:        sseMgr,
+		startTime:         startTime,
 	}
 }
 
 // RegisterHandlers 负责注册所有路由
 func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// API 路由
+	mux.HandleFunc("/api/health", s.handleHealthCheck)
 	mux.HandleFunc("/api/config", s.handleGetConfig)
 	mux.HandleFunc("/api/outbounds", s.handleGetOutbounds)
 	mux.HandleFunc("/api/outbound-status", s.handleGetOutboundStatus)

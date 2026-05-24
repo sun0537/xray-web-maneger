@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 
+	"xray-web-manager/internal/xray-proto/app/observatory"
 	observatorypb "xray-web-manager/internal/xray-proto/app/observatory/command"
 	handlerpb "xray-web-manager/internal/xray-proto/app/proxyman/command"
 	routingpb "xray-web-manager/internal/xray-proto/app/router/command"
@@ -123,7 +124,27 @@ type MockObservatoryClient struct {
 }
 
 func (m *MockObservatoryClient) GetOutboundStatus(ctx context.Context, in *observatorypb.GetOutboundStatusRequest, opts ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
-	return &observatorypb.GetOutboundStatusResponse{}, nil
+	return &observatorypb.GetOutboundStatusResponse{
+		Status: &observatory.ObservationResult{
+			Status: []*observatory.OutboundStatus{},
+		},
+	}, nil
+}
+
+type MockObservatoryClientWithStatus struct {
+	observatorypb.UnimplementedObservatoryServiceServer
+}
+
+func (m *MockObservatoryClientWithStatus) GetOutboundStatus(ctx context.Context, in *observatorypb.GetOutboundStatusRequest, opts ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	return &observatorypb.GetOutboundStatusResponse{
+		Status: &observatory.ObservationResult{
+			Status: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+				{OutboundTag: "node-2", Alive: true, Delay: 120},
+				{OutboundTag: "node-3", Alive: false, Delay: 0},
+			},
+		},
+	}, nil
 }
 
 func TestHandleGetOutbounds(t *testing.T) {
@@ -160,6 +181,38 @@ func TestHandleGetOutbounds(t *testing.T) {
 	assert.Equal(t, "socks", responseBody[5].Protocol)
 }
 
+func TestHandleGetOutboundsStatus(t *testing.T) {
+	s := &Server{
+		config:            config.Config{},
+		observatoryClient: &MockObservatoryClientWithStatus{},
+		startTime:     time.Time{},
+	}
+
+	req, err := http.NewRequest("GET", "/api/outbounds-status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+
+	s.handleGetOutboundsStatus(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var responseBody []OutboundStatusData
+	err = json.Unmarshal(rr.Body.Bytes(), &responseBody)
+	assert.NoError(t, err)
+	assert.Len(t, responseBody, 3)
+	assert.Equal(t, "node-1", responseBody[0].Tag)
+	assert.Equal(t, true, responseBody[0].Alive)
+	assert.Equal(t, int64(50), responseBody[0].Delay)
+	assert.Equal(t, "node-2", responseBody[1].Tag)
+	assert.Equal(t, true, responseBody[1].Alive)
+	assert.Equal(t, int64(120), responseBody[1].Delay)
+	assert.Equal(t, "node-3", responseBody[2].Tag)
+	assert.Equal(t, false, responseBody[2].Alive)
+	assert.Equal(t, int64(0), responseBody[2].Delay)
+}
+
 func TestHandleStatsSSE(t *testing.T) {
 	sseMgr := sse.NewManager()
 
@@ -170,6 +223,7 @@ func TestHandleStatsSSE(t *testing.T) {
 		handlerClient:     &MockHandlerClient{},
 		routingClient:     &MockRoutingClient{},
 		observatoryClient: &MockObservatoryClient{},
+		startTime:         time.Time{},
 	}
 
 	mux := http.NewServeMux()
@@ -204,6 +258,9 @@ func TestHandleStatsSSE(t *testing.T) {
 	assert.Equal(t, float64(2048), stats["downlink"])
 	assert.Equal(t, float64(100), stats["uptime"])
 	assert.Equal(t, float64(10), stats["goroutines"])
+
+	assert.NotNil(t, stats["outbounds"], "outbounds 字段应存在且不为 nil")
+	assert.IsType(t, []interface{}{}, stats["outbounds"], "outbounds 应为数组类型")
 
 	assert.True(t, scanner.Scan(), "服务器应在 data 后发送空行")
 	assert.Equal(t, "", scanner.Text())

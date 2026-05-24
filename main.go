@@ -28,7 +28,10 @@ var frontendFS embed.FS
 var devMode = flag.Bool("dev", false, "开发模式：使用外部文件而不是嵌入文件")
 var configPath = flag.String("c,config", "", "指定配置文件路径 (config.yaml)")
 
+var startTime time.Time
+
 func main() {
+	startTime = time.Now()
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Xray Web Manager: 一个用于切换 Xray 出站节点的 Web 管理面板。\n\n")
 		fmt.Fprintf(os.Stderr, "用法 (Usage):\n")
@@ -78,7 +81,7 @@ func main() {
 	log.Println("已成功连接到 Xray gRPC API")
 
 	sseMgr := sse.NewManager()
-	srv := server.NewServer(cfg, conn, sseMgr)
+	srv := server.NewServer(cfg, conn, sseMgr, startTime)
 
 	mainMux := http.NewServeMux()
 	apiMux := http.NewServeMux()
@@ -90,6 +93,7 @@ func main() {
 	server.RegisterFrontend(mainMux, *devMode, frontendFS)
 
 	var finalHandler http.Handler = mainMux
+	finalHandler = middleware.BasicAuth(cfg.Auth.Username, cfg.Auth.Password)(finalHandler)
 	finalHandler = middleware.Logger(finalHandler)
 	finalHandler = middleware.Recovery(finalHandler)
 
@@ -115,25 +119,19 @@ func main() {
 		log.Fatalf("启动服务器失败: %v", err)
 
 	case sig := <-sigChan:
-		log.Printf("收到信号: %v，开始优雅关闭...", sig)
+		log.Printf("收到终止信号: %v，开始优雅关闭...", sig)
 
-		log.Printf("步骤 1/2: 关闭 SSE 连接...")
+		log.Println("阶段 1/3: 关闭 SSE 连接...")
 		srv.Shutdown()
 
-		time.Sleep(500 * time.Millisecond)
-
-		log.Printf("步骤 2/2: 关闭 HTTP 服务器...")
-
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("服务器关闭出现问题: %v", err)
-			if closeErr := httpServer.Close(); closeErr != nil {
-				log.Printf("强制关闭失败: %v", closeErr)
-			}
-		} else {
-			log.Println("服务器已优雅关闭")
+		log.Println("阶段 2/3: 关闭 HTTP 服务器...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := httpServer.Shutdown(ctx); err != nil {
+			log.Printf("优雅关闭失败: %v，强制关闭", err)
+			httpServer.Close()
 		}
+		cancel()
+
+		log.Println("阶段 3/3: 优雅关闭完成")
 	}
 }
