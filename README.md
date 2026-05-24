@@ -20,6 +20,13 @@ server:
 xray:
     api_addr: localhost:10085
     balancer_tag: balancer
+# 不设置或留空 = 不启用认证（默认行为）
+auth: {}
+
+# 启用认证
+auth:
+  username: "admin"
+  password: "your_password"
 ```
 - server.host:server.port 监听的 IP 和 端口，默认为 0.0.0.0:9098，web 服务监听的端口
 - allowed_origins: ["http://192.168.8.10:9098"] 允许访问的来源
