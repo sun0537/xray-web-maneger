@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -41,13 +43,27 @@ type OutboundStatusData struct {
 	Delay int64  `json:"delay"`
 }
 
+type HealthStatus struct {
+	Status         string `json:"status"`
+	XrayAPIStatus  string `json:"xray_api_status"`
+	SSEConnections int    `json:"sse_connections"`
+	Uptime         int64  `json:"uptime"`
+	BalancerTag    string `json:"balancer_tag"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
+type ErrorResponse struct {
+	Error     string `json:"error"`
+	ErrorType string `json:"error_type"`
+}
+
 type StatsData struct {
 	Uplink     int64                `json:"uplink"`
 	Downlink   int64                `json:"downlink"`
 	Uptime     int64                `json:"uptime"`
 	SysMem     uint64               `json:"sys_mem"`
 	Goroutines int                  `json:"goroutines"`
-	Outbounds  []OutboundStatusData `json:"outbounds,omitempty"`
+	Outbounds  []OutboundStatusData `json:"outbounds"`
 }
 
 type CurrentOutboundData struct {
@@ -67,7 +83,9 @@ func (s *Server) handleGetOutbounds(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.handlerClient.ListOutbounds(ctx, &handlerpb.ListOutboundsRequest{})
 	if err != nil {
-		jsonError(w, "无法获取出站列表: "+err.Error(), http.StatusInternalServerError)
+		errorMsg := fmt.Sprintf("无法获取出站列表: %v", err)
+		log.Printf("获取出站列表失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusInternalServerError)
 		return
 	}
 
@@ -106,7 +124,9 @@ func isValidOutbound(protocolName string) bool {
 func (s *Server) handleGetOutboundStatus(w http.ResponseWriter, r *http.Request) {
 	tag := r.URL.Query().Get("tag")
 	if tag == "" {
-		jsonError(w, "缺少 'tag' 查询参数", http.StatusBadRequest)
+		errorMsg := "缺少 'tag' 查询参数"
+		log.Printf("获取出站状态失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusBadRequest)
 		return
 	}
 
@@ -114,6 +134,7 @@ func (s *Server) handleGetOutboundStatus(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 
 	statuses := s.getAllOutboundStatuses(ctx)
+
 	for _, st := range statuses {
 		if st.Tag == tag {
 			jsonResponse(w, st, http.StatusOK)
@@ -121,7 +142,7 @@ func (s *Server) handleGetOutboundStatus(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	log.Printf("未在观测结果中找到 tag: %s", tag)
+	log.Printf("未在观测结果中找到 tag: %s (请求来源: %s)", tag, r.RemoteAddr)
 	jsonResponse(w, OutboundStatusData{Tag: tag, Alive: false, Delay: 0}, http.StatusNotFound)
 }
 
@@ -144,6 +165,8 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 		Tag: s.config.Xray.BalancerTag,
 	})
 	if err != nil {
+		errorMsg := fmt.Sprintf("获取负载均衡器信息失败: %v", err)
+		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %s", s.config.Xray.BalancerTag, r.RemoteAddr, errorMsg)
 		jsonResponse(w, CurrentOutboundData{Current: "", Auto: true}, http.StatusOK)
 		return
 	}
@@ -160,7 +183,9 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		jsonError(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		errorMsg := "仅支持 POST 方法"
+		log.Printf("切换出站失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -169,7 +194,16 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-		jsonError(w, "无效的请求体: "+err.Error(), http.StatusBadRequest)
+		errorMsg := fmt.Sprintf("无效的请求体: %v", err)
+		log.Printf("切换出站失败 [请求来源: %s, 解码错误]: %s", r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusBadRequest)
+		return
+	}
+
+	if reqBody.OutboundTag == "" {
+		errorMsg := "缺少 outbound_tag 参数"
+		log.Printf("切换出站失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusBadRequest)
 		return
 	}
 
@@ -181,7 +215,9 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 		Target:      reqBody.OutboundTag,
 	})
 	if err != nil {
-		jsonError(w, "切换出站失败: "+err.Error(), http.StatusInternalServerError)
+		errorMsg := fmt.Sprintf("切换出站失败: %v", err)
+		log.Printf("切换出站失败 [目标: %s, 负载均衡器: %s, 请求来源: %s]: %s", reqBody.OutboundTag, s.config.Xray.BalancerTag, r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusInternalServerError)
 		return
 	}
 
@@ -189,6 +225,8 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
+	log.Printf("SSE 连接请求 - 请求来源: %s", r.RemoteAddr)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -196,13 +234,17 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		jsonError(w, "SSE not supported (http.Flusher not available)", http.StatusInternalServerError)
+		errorMsg := "SSE not supported (http.Flusher not available)"
+		log.Printf("SSE 连接失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusInternalServerError)
 		return
 	}
 
 	conn, ctx := s.sseManager.Add(r.Context())
 	if conn == nil {
-		jsonError(w, "Server is shutting down", http.StatusServiceUnavailable)
+		errorMsg := "Server is shutting down"
+		log.Printf("SSE 连接失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
+		jsonError(w, errorMsg, http.StatusServiceUnavailable)
 		return
 	}
 	defer s.sseManager.Remove(conn)
@@ -214,10 +256,10 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
 
-	log.Println("SSE 客户端已连接，开始推送统计数据")
+	log.Printf("SSE 客户端已连接 - 请求来源: %s", r.RemoteAddr)
 
 	if err := s.sendStatsUpdate(ctx, w, flusher); err != nil {
-		log.Printf("发送初始统计数据失败: %v", err)
+		log.Printf("发送初始统计数据失败 [请求来源: %s]: %v", r.RemoteAddr, err)
 		return
 	}
 
@@ -225,9 +267,9 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.Canceled {
-				log.Println("SSE 客户端已断开连接(正常)")
+				log.Printf("SSE 客户端已断开连接(正常) - 请求来源: %s", r.RemoteAddr)
 			} else {
-				log.Printf("SSE 连接结束 (非预期): %v", ctx.Err())
+				log.Printf("SSE 连接结束 (非预期) - 请求来源: %s, 错误: %v", r.RemoteAddr, ctx.Err())
 			}
 			return
 
@@ -238,7 +280,7 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 			if err := s.sendStatsUpdate(ctx, w, flusher); err != nil {
 				if ctx.Err() == nil {
-					log.Printf("发送统计数据失败: %v", err)
+					log.Printf("发送统计数据失败 [请求来源: %s]: %v", r.RemoteAddr, err)
 				}
 				return
 			}
@@ -249,12 +291,17 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	stats := StatsData{}
 
-	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
-	defer cancel()
-
-	queryResp, err := s.statsClient.QueryStats(gCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
+	queryCtx, queryCancel := context.WithTimeout(ctx, grpcTimeout)
+	queryResp, err := s.statsClient.QueryStats(queryCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
+	queryCancel()
 	if err != nil {
-		log.Printf("警告: QueryStats 失败: %v", err)
+		// 分类错误类型
+		errorType := "permanent"
+		if isTemporaryError(err) {
+			errorType = "temporary"
+		}
+
+		log.Printf("QueryStats 错误 [类型: %s, 上下文: inbound流量统计]: %v", errorType, err)
 	} else {
 		for _, stat := range queryResp.Stat {
 			if strings.HasSuffix(stat.Name, ">>>traffic>>>uplink") {
@@ -265,9 +312,17 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 		}
 	}
 
-	sysResp, err := s.statsClient.GetSysStats(gCtx, &statspb.SysStatsRequest{})
+	sysCtx, sysCancel := context.WithTimeout(ctx, grpcTimeout)
+	sysResp, err := s.statsClient.GetSysStats(sysCtx, &statspb.SysStatsRequest{})
+	sysCancel()
 	if err != nil {
-		log.Printf("警告: GetSysStats 失败: %v", err)
+		// 分类错误类型
+		errorType := "permanent"
+		if isTemporaryError(err) {
+			errorType = "temporary"
+		}
+
+		log.Printf("GetSysStats 错误 [类型: %s, 上下文: 系统统计]: %v", errorType, err)
 	} else if sysResp != nil {
 		stats.Uptime = int64(sysResp.GetUptime())
 		stats.SysMem = sysResp.GetSys()
@@ -276,6 +331,27 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 
 	stats.Outbounds = s.getAllOutboundStatuses(ctx)
 	return stats, nil
+}
+
+var temporaryErrors = []string{
+	"timeout", "deadline exceeded", "connection refused",
+	"no route to host", "connection reset", "dial tcp",
+}
+
+func isTemporaryError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Temporary()
+	}
+
+	errMsg := strings.ToLower(err.Error())
+	for _, tempErr := range temporaryErrors {
+		if strings.Contains(errMsg, tempErr) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusData {
@@ -330,7 +406,40 @@ func jsonResponse(w http.ResponseWriter, data interface{}, statusCode int) {
 	}
 }
 
+func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	health := HealthStatus{
+		Status:         "healthy",
+		XrayAPIStatus:  "connected",
+		SSEConnections: s.sseManager.Count(),
+		Uptime:         int64(time.Since(s.startTime).Seconds()),
+		BalancerTag:    s.config.Xray.BalancerTag,
+		Timestamp:      time.Now().Unix(),
+	}
+
+	// 验证 Xray API 连接状态
+	if s.handlerClient == nil || s.routingClient == nil || s.observatoryClient == nil || s.statsClient == nil {
+		health.XrayAPIStatus = "disconnected"
+		health.Status = "unhealthy"
+	}
+
+	jsonResponse(w, health, http.StatusOK)
+}
+
 func jsonError(w http.ResponseWriter, message string, statusCode int) {
-	log.Println("API Error:", message)
-	jsonResponse(w, map[string]string{"error": message}, statusCode)
+	// 分类错误类型
+	errorType := "unknown"
+	if strings.Contains(message, "连接") || strings.Contains(message, "网络") {
+		errorType = "network"
+	} else if strings.Contains(message, "认证") || strings.Contains(message, "证书") || strings.Contains(message, "tls") {
+		errorType = "auth"
+	} else if strings.Contains(message, "参数") || strings.Contains(message, "查询") {
+		errorType = "validation"
+	} else if strings.Contains(message, "服务不可用") || strings.Contains(message, "关闭") {
+		errorType = "service_unavailable"
+	} else if strings.Contains(message, "内部") || strings.Contains(message, "服务器") {
+		errorType = "server"
+	}
+
+	log.Printf("API Error [类型: %s, 状态码: %d]: %s", errorType, statusCode, message)
+	jsonResponse(w, ErrorResponse{Error: message, ErrorType: errorType}, statusCode)
 }

@@ -23,6 +23,10 @@ type Config struct {
 		ApiAddr     string `yaml:"api_addr"`     // Xray gRPC 地址
 		BalancerTag string `yaml:"balancer_tag"` // 负载均衡器标签
 	} `yaml:"xray"`
+	Auth struct {
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+	} `yaml:"auth"`
 }
 
 // 默认配置
@@ -42,6 +46,13 @@ var defaultConfig = Config{
 	}{
 		ApiAddr:     "localhost:10085",
 		BalancerTag: "balancer",
+	},
+	Auth: struct {
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+	}{
+		Username: "",
+		Password: "",
 	},
 }
 
