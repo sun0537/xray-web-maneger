@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"xray-web-manager/config"
 	"xray-web-manager/middleware"
@@ -65,6 +66,11 @@ func main() {
 	for i := 0; i < maxRetries; i++ {
 		conn, err = grpc.NewClient(cfg.Xray.ApiAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
 		)
 		if err == nil {
 			break

@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"embed"
+	"encoding/json"
 	"io/fs"
 	"log"
 	"net/http"
@@ -26,12 +28,13 @@ type Server struct {
 	observatoryClient observatorypb.ObservatoryServiceClient
 	statsClient       statspb.StatsServiceClient
 	sseManager        *sse.Manager
+	broadcaster       *sse.Broadcaster
 	startTime         time.Time
 }
 
 // NewServer 是一个构造函数，用于创建 Server 实例
 func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, startTime time.Time) *Server {
-	return &Server{
+	s := &Server{
 		config:            cfg,
 		handlerClient:     handlerpb.NewHandlerServiceClient(conn),
 		routingClient:     routingpb.NewRoutingServiceClient(conn),
@@ -40,6 +43,17 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 		sseManager:        sseMgr,
 		startTime:         startTime,
 	}
+
+	s.broadcaster = sse.NewBroadcaster(func() ([]byte, error) {
+		stats, err := s.getCombinedStats(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(stats)
+	}, sseUpdateInterval)
+	s.broadcaster.Start()
+
+	return s
 }
 
 // RegisterHandlers 负责注册所有路由
@@ -57,6 +71,8 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 
 // Shutdown 封装了服务关闭时的清理逻辑
 func (s *Server) Shutdown() {
+	log.Println("正在关闭 SSE 广播器...")
+	s.broadcaster.Stop()
 	log.Println("正在关闭 SSE 管理器...")
 	s.sseManager.CloseAll()
 }
