@@ -3,10 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -31,6 +29,8 @@ var excludeProtocols = map[string]bool{
 	"dns":       true,
 	"blackhole": true,
 }
+
+var heartbeatBytes = []byte(": heartbeat\n\n")
 
 type OutboundInfo struct {
 	Tag      string `json:"tag"`
@@ -112,13 +112,13 @@ func parseProtocol(settings *serial.TypedMessage) string {
 	}
 	parts := strings.Split(settings.Type, ".")
 	if len(parts) > 2 {
-		return parts[2]
+		return strings.ToLower(parts[2])
 	}
 	return "unknown"
 }
 
 func isValidOutbound(protocolName string) bool {
-	return !excludeProtocols[strings.ToLower(protocolName)]
+	return !excludeProtocols[protocolName]
 }
 
 func (s *Server) handleGetOutboundStatus(w http.ResponseWriter, r *http.Request) {
@@ -200,13 +200,6 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if reqBody.OutboundTag == "" {
-		errorMsg := "缺少 outbound_tag 参数"
-		log.Printf("切换出站失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
-		jsonError(w, errorMsg, http.StatusBadRequest)
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
 	defer cancel()
 
@@ -250,8 +243,8 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	defer s.sseManager.Remove(conn)
 	defer conn.Close()
 
-	ticker := time.NewTicker(sseUpdateInterval)
-	defer ticker.Stop()
+	statsCh := s.broadcaster.Subscribe()
+	defer s.broadcaster.Unsubscribe(statsCh)
 
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
@@ -274,16 +267,20 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 			return
 
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ": heartbeat\n\n")
+			w.Write(heartbeatBytes)
 			flusher.Flush()
 
-		case <-ticker.C:
-			if err := s.sendStatsUpdate(ctx, w, flusher); err != nil {
+		case jsonData, ok := <-statsCh:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData); err != nil {
 				if ctx.Err() == nil {
 					log.Printf("发送统计数据失败 [请求来源: %s]: %v", r.RemoteAddr, err)
 				}
 				return
 			}
+			flusher.Flush()
 		}
 	}
 }
@@ -291,16 +288,16 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	stats := StatsData{}
 
-	queryCtx, queryCancel := context.WithTimeout(ctx, grpcTimeout)
-	queryResp, err := s.statsClient.QueryStats(queryCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
-	queryCancel()
+	// Reuse a single context for all gRPC calls to avoid per-call context allocations
+	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
+	defer cancel()
+
+	queryResp, err := s.statsClient.QueryStats(gCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
 	if err != nil {
-		// 分类错误类型
 		errorType := "permanent"
 		if isTemporaryError(err) {
 			errorType = "temporary"
 		}
-
 		log.Printf("QueryStats 错误 [类型: %s, 上下文: inbound流量统计]: %v", errorType, err)
 	} else {
 		for _, stat := range queryResp.Stat {
@@ -312,16 +309,12 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 		}
 	}
 
-	sysCtx, sysCancel := context.WithTimeout(ctx, grpcTimeout)
-	sysResp, err := s.statsClient.GetSysStats(sysCtx, &statspb.SysStatsRequest{})
-	sysCancel()
+	sysResp, err := s.statsClient.GetSysStats(gCtx, &statspb.SysStatsRequest{})
 	if err != nil {
-		// 分类错误类型
 		errorType := "permanent"
 		if isTemporaryError(err) {
 			errorType = "temporary"
 		}
-
 		log.Printf("GetSysStats 错误 [类型: %s, 上下文: 系统统计]: %v", errorType, err)
 	} else if sysResp != nil {
 		stats.Uptime = int64(sysResp.GetUptime())
@@ -333,25 +326,19 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	return stats, nil
 }
 
-var temporaryErrors = []string{
-	"timeout", "deadline exceeded", "connection refused",
-	"no route to host", "connection reset", "dial tcp",
-}
-
 func isTemporaryError(err error) bool {
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return netErr.Temporary()
-	}
-
 	errMsg := strings.ToLower(err.Error())
 	for _, tempErr := range temporaryErrors {
 		if strings.Contains(errMsg, tempErr) {
 			return true
 		}
 	}
-
 	return false
+}
+
+var temporaryErrors = []string{
+	"timeout", "deadline exceeded", "connection refused",
+	"no route to host", "connection reset", "dial tcp",
 }
 
 func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusData {
@@ -402,7 +389,7 @@ func jsonResponse(w http.ResponseWriter, data interface{}, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("写入 JSON 响应失败: %v", err)
+		log.Printf("JSON 序列化/写入响应失败: %v", err)
 	}
 }
 

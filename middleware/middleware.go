@@ -27,12 +27,22 @@ func (lrw *loggingResponseWriter) Flush() {
 	}
 }
 
+var writerPool = sync.Pool{
+	New: func() interface{} {
+		return &loggingResponseWriter{}
+	},
+}
+
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		lrw := writerPool.Get().(*loggingResponseWriter)
+		lrw.ResponseWriter = w
+		lrw.statusCode = http.StatusOK
 		next.ServeHTTP(lrw, r)
 		log.Printf("%s %s %d %v", r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
+		lrw.ResponseWriter = nil
+		writerPool.Put(lrw)
 	})
 }
 
@@ -113,6 +123,23 @@ var limiter = rateLimiter{
 	window:   time.Minute,
 }
 
+func init() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			limiter.Lock()
+			now := time.Now()
+			for ip, sw := range limiter.requests {
+				if now.Sub(sw.startTime) > limiter.window {
+					delete(limiter.requests, ip)
+				}
+			}
+			limiter.Unlock()
+		}
+	}()
+}
+
 func (rl *rateLimiter) isRateLimited(ip string) bool {
 	rl.RLock()
 	defer rl.RUnlock()
@@ -172,20 +199,18 @@ func RateLimit(next http.Handler) http.Handler {
 }
 
 func BasicAuth(username, password string) func(http.Handler) http.Handler {
+	if username == "" || password == "" {
+		return func(next http.Handler) http.Handler { return next }
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if username == "" || password == "" {
-				next.ServeHTTP(w, r)
-				return
-			}
-
 			user, pass, ok := r.BasicAuth()
 			if !ok || user != username || pass != password {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Xray Manager"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
-
 			next.ServeHTTP(w, r)
 		})
 	}

@@ -216,6 +216,17 @@ func TestHandleGetOutboundsStatus(t *testing.T) {
 func TestHandleStatsSSE(t *testing.T) {
 	sseMgr := sse.NewManager()
 
+	fetchFn := func() ([]byte, error) {
+		stats := StatsData{
+			Uplink: 1024, Downlink: 2048, Uptime: 100,
+			SysMem: 50000000, Goroutines: 10, Outbounds: []OutboundStatusData{},
+		}
+		return json.Marshal(stats)
+	}
+	broadcaster := sse.NewBroadcaster(fetchFn, 100*time.Millisecond)
+	broadcaster.Start()
+	defer broadcaster.Stop()
+
 	s := &Server{
 		config:            config.Config{},
 		statsClient:       &MockStatsClient{},
@@ -223,6 +234,7 @@ func TestHandleStatsSSE(t *testing.T) {
 		handlerClient:     &MockHandlerClient{},
 		routingClient:     &MockRoutingClient{},
 		observatoryClient: &MockObservatoryClient{},
+		broadcaster:       broadcaster,
 		startTime:         time.Time{},
 	}
 
@@ -265,7 +277,7 @@ func TestHandleStatsSSE(t *testing.T) {
 	assert.True(t, scanner.Scan(), "服务器应在 data 后发送空行")
 	assert.Equal(t, "", scanner.Text())
 
-	assert.True(t, scanner.Scan(), "服务器应在 2 秒后发送第二个 event")
+	assert.True(t, scanner.Scan(), "服务器应通过广播器发送第二个 event")
 	assert.Equal(t, "event: update", scanner.Text())
 	assert.True(t, scanner.Scan(), "服务器应发送第二个 data")
 	assert.True(t, scanner.Scan(), "服务器应发送第二个空行")
