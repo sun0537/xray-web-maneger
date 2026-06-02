@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -289,4 +290,110 @@ func TestHandleStatsSSE(t *testing.T) {
 	// After the initial push, the broadcaster may send additional events.
 	// With dedup, unchanged data is suppressed. We just verify the connection
 	// produces at least one valid SSE frame — further frames are optional.
+}
+
+type MockRoutingClientSuccess struct {
+	routingpb.UnimplementedRoutingServiceServer
+}
+
+func (m *MockRoutingClientSuccess) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
+	return &routingpb.OverrideBalancerTargetResponse{}, nil
+}
+func (m *MockRoutingClientSuccess) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientSuccess) AddRule(ctx context.Context, in *routingpb.AddRuleRequest, opts ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientSuccess) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientSuccess) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientSuccess) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (routingpb.RoutingService_SubscribeRoutingStatsClient, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientSuccess) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
+	return nil, nil
+}
+
+func TestHandleSwitchOutbound(t *testing.T) {
+	s := &Server{
+		config: config.Config{
+			Xray: config.XrayConfig{BalancerTag: "balancer"},
+		},
+		routingClient: &MockRoutingClientSuccess{},
+	}
+
+	t.Run("Success", func(t *testing.T) {
+		body := `{"outbound_tag": "node-1"}`
+		req, _ := http.NewRequest("POST", "/api/switch-outbound", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		s.handleSwitchOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp map[string]string
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.Equal(t, "success", resp["status"])
+	})
+
+	t.Run("Empty body", func(t *testing.T) {
+		req, _ := http.NewRequest("POST", "/api/switch-outbound", bytes.NewBufferString(""))
+		rr := httptest.NewRecorder()
+
+		s.handleSwitchOutbound(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("Illegal characters", func(t *testing.T) {
+		body := `{"outbound_tag": "node<script>"}`
+		req, _ := http.NewRequest("POST", "/api/switch-outbound", bytes.NewBufferString(body))
+		rr := httptest.NewRecorder()
+
+		s.handleSwitchOutbound(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("Tag too long", func(t *testing.T) {
+		longTag := strings.Repeat("a", 257)
+		body := `{"outbound_tag": "` + longTag + `"}`
+		req, _ := http.NewRequest("POST", "/api/switch-outbound", bytes.NewBufferString(body))
+		rr := httptest.NewRecorder()
+
+		s.handleSwitchOutbound(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+}
+
+func TestHandleHealthCheck(t *testing.T) {
+	sseMgr := sse.NewManager()
+	s := &Server{
+		config: config.Config{
+			Xray: config.XrayConfig{BalancerTag: "balancer"},
+		},
+		statsClient: &MockStatsClient{},
+		sseManager:  sseMgr,
+		startTime:   time.Now().Add(-100 * time.Second),
+	}
+
+	req, _ := http.NewRequest("GET", "/api/health", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleHealthCheck(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var health HealthStatus
+	err := json.Unmarshal(rr.Body.Bytes(), &health)
+	assert.NoError(t, err)
+	assert.Equal(t, "healthy", health.Status)
+	assert.Equal(t, "connected", health.XrayAPIStatus)
+	assert.Equal(t, "balancer", health.BalancerTag)
+	assert.True(t, health.Uptime >= 99)
 }
