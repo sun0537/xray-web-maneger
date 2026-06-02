@@ -1,50 +1,34 @@
 const XrayManager = (function() {
-    // 封装全局变量和主要逻辑
     let currentOutbound = '';
+    let prevCurrentOutbound = '';
     let balancerTag = 'balancer';
     let didInitialAutoSelect = false;
     let fixedNodeOrder = [];
     let pageReady = false;
-    
-    // 公共方法
+
     return {
-        initialize: function() {
-            NetworkManager.loadConfig();
-        },
-        getCurrentOutbound: function() {
-            return currentOutbound;
-        },
-        setCurrentOutbound: function(value) {
-            currentOutbound = value;
-        },
-        getBalancerTag: function() {
-            return balancerTag;
-        },
-        setBalancerTag: function(value) {
-            balancerTag = value;
-        },
-        getDidInitialAutoSelect: function() {
-            return didInitialAutoSelect;
-        },
-        setDidInitialAutoSelect: function(value) {
-            didInitialAutoSelect = value;
-        },
-        getFixedNodeOrder: function() {
-            return fixedNodeOrder;
-        },
-        setFixedNodeOrder: function(value) {
-            fixedNodeOrder = value;
-        },
-        getPageReady: function() {
-            return pageReady;
-        },
-        setPageReady: function(value) {
-            pageReady = value;
-        }
+        getCurrentOutbound: function() { return currentOutbound; },
+        setCurrentOutbound: function(v) { currentOutbound = v; },
+        getPrevCurrentOutbound: function() { return prevCurrentOutbound; },
+        setPrevCurrentOutbound: function(v) { prevCurrentOutbound = v; },
+        getBalancerTag: function() { return balancerTag; },
+        setBalancerTag: function(v) { balancerTag = v; },
+        getDidInitialAutoSelect: function() { return didInitialAutoSelect; },
+        setDidInitialAutoSelect: function(v) { didInitialAutoSelect = v; },
+        getFixedNodeOrder: function() { return fixedNodeOrder; },
+        setFixedNodeOrder: function(v) { fixedNodeOrder = v; },
+        getPageReady: function() { return pageReady; },
+        setPageReady: function(v) { pageReady = v; }
     };
 })();
 
 const $ = (id) => document.getElementById(id);
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
 
 const UIManager = (function() {
     const els = {
@@ -59,12 +43,10 @@ const UIManager = (function() {
         refreshBtn: $('refresh-btn'),
         resetBtn: $('reset-btn'),
     };
-    
+
     return {
-        getElements: function() {
-            return els;
-        },
-        
+        getElements: function() { return els; },
+
         updateStatsUI: function(data) {
             if (!data) return;
             els.uplink.textContent = formatBytes(data.uplink);
@@ -73,7 +55,7 @@ const UIManager = (function() {
             els.sysMem.textContent = formatBytes(data.sys_mem);
             els.goroutines.textContent = data.goroutines;
         },
-        
+
         updateAllCardStatuses: function(outbounds) {
             for (const s of outbounds) {
                 if (s && s.tag) {
@@ -81,7 +63,7 @@ const UIManager = (function() {
                 }
             }
         },
-        
+
         updateCardStatus: function(tag, status) {
             const statusEl = document.getElementById('status-' + tag);
             if (!statusEl) {
@@ -93,7 +75,7 @@ const UIManager = (function() {
             }
             this.performUIUpdate(statusEl, status);
         },
-        
+
         performUIUpdate: function(statusEl, status) {
             if (status && status.error !== 'not_found' && status.error !== 'fetch_failed') {
                 const alive = status.alive;
@@ -103,7 +85,7 @@ const UIManager = (function() {
                         '<span class="animate-pulse absolute inline-flex h-2 w-2 rounded-full bg-yellow-500 opacity-75"></span>' +
                         '<span class="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>' +
                         '</span>' +
-                        '<span class="font-mono font-semibold text-yellow-400">检测中...</span>';
+                        '<span class="font-mono font-semibold text-yellow-400">\u68C0\u6D4B\u4E2D...</span>';
                     statusEl.className = 'flex items-center gap-2 text-xs text-yellow-400';
                     return;
                 }
@@ -113,12 +95,35 @@ const UIManager = (function() {
                     '<span class="animate-ping absolute inline-flex h-2 w-2 rounded-full ' + color + ' opacity-75"></span>' +
                     '<span class="relative inline-flex rounded-full h-2 w-2 ' + color + '"></span>' +
                     '</span>' +
-                    '<span class="font-mono font-semibold">' + delay + ' ms</span>';
+                    '<span class="font-mono font-semibold">' + (delay || 0) + ' ms</span>';
                 statusEl.className = 'flex items-center gap-2 text-xs ' + statusColor;
             } else {
-                statusEl.innerHTML = '<span>&#9675; 检测失败</span>';
+                statusEl.innerHTML = '<span>&#9675; \u68C0\u6D4B\u5931\u8D25</span>';
                 statusEl.className = 'flex items-center gap-2 text-xs text-white/70';
             }
+        },
+
+        updateCurrentDisplay: function(auto, current) {
+            const el = els.currentTag;
+            while (el.firstChild) el.removeChild(el.firstChild);
+            const span = document.createElement('span');
+            if (auto || !current) {
+                span.className = 'text-orange-300';
+                span.textContent = '\uD83D\uDD04 \u81EA\u52A8\u5747\u8861\u6A21\u5F0F';
+            } else {
+                span.className = 'text-green-300';
+                span.textContent = '\u2713 ' + current;
+            }
+            el.appendChild(span);
+        },
+
+        updateErrorDisplay: function() {
+            const el = els.currentTag;
+            while (el.firstChild) el.removeChild(el.firstChild);
+            const span = document.createElement('span');
+            span.className = 'text-red-300';
+            span.textContent = '\u2717 \u83B7\u53D6\u5931\u8D25';
+            el.appendChild(span);
         }
     };
 })();
@@ -126,168 +131,186 @@ const UIManager = (function() {
 const NotificationManager = (function() {
     let notificationEl = null;
     let notificationTimer = null;
-    
+
     return {
         showNotification: function(message, type) {
             if (!notificationEl) {
                 notificationEl = document.createElement('div');
-                notificationEl.className = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-2xl z-50 animate-bounce';
+                notificationEl.setAttribute('role', 'alert');
+                notificationEl.className = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-2xl z-50 transition-all duration-300';
                 notificationEl.style.display = 'none';
                 document.body.appendChild(notificationEl);
             }
             if (notificationTimer) clearTimeout(notificationTimer);
-            notificationEl.className = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-2xl z-50 animate-bounce ' +
+            notificationEl.className = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-2xl z-50 transition-all duration-300 ' +
                 (type === 'success' ? 'bg-green-500' : 'bg-red-500');
-            notificationEl.innerHTML = message;
+            notificationEl.textContent = message;
             notificationEl.style.display = '';
-            notificationTimer = setTimeout(() => { notificationEl.style.display = 'none'; }, 3000);
+            notificationTimer = setTimeout(function() { notificationEl.style.display = 'none'; }, 3000);
         }
     };
 })();
 
-window.addEventListener('error', (e) => {
+window.addEventListener('error', function(e) {
     console.error('Global error:', e.error);
-    NotificationManager.showNotification('发生错误: ' + e.message, 'error');
+    NotificationManager.showNotification('\u53D1\u751F\u9519\u8BEF: ' + e.message, 'error');
 });
 
-window.addEventListener('load', () => {
-    XrayManager.initialize();
+window.addEventListener('load', function() {
+    NetworkManager.loadConfig();
     connectStatsSSE();
 
-    const uiElements = UIManager.getElements();
-    uiElements.resetBtn.addEventListener('click', () => {
-        NetworkManager.applyOutboundChange('', '自动均衡', { reload: true });
+    var uiElements = UIManager.getElements();
+    uiElements.resetBtn.addEventListener('click', function() {
+        NetworkManager.applyOutboundChange('', '\u81EA\u52A8\u5747\u8861', { reload: true });
     });
 
-    let refreshing = false;
-    uiElements.refreshBtn.addEventListener('click', async () => {
+    var refreshing = false;
+    uiElements.refreshBtn.addEventListener('click', async function() {
         if (refreshing) return;
         refreshing = true;
         try {
             XrayManager.setDidInitialAutoSelect(true);
             await NetworkManager.initializePage();
         } finally {
-            setTimeout(() => refreshing = false, 1000);
+            refreshing = false;
         }
     });
 });
 
+window.addEventListener('beforeunload', function() {
+    if (window._sseEventSource) {
+        window._sseEventSource.close();
+    }
+});
+
 const NetworkManager = (function() {
+    async function safeJson(response) {
+        var contentType = response.headers.get('content-type') || '';
+        if (contentType.indexOf('application/json') !== -1) {
+            return await response.json();
+        }
+        throw new Error('Server returned non-JSON response (' + response.status + ')');
+    }
+
     return {
         loadConfig: async function() {
             try {
-                const response = await fetch('/api/config');
+                var response = await fetch('/api/config');
                 if (response.ok) {
-                    const config = await response.json();
+                    var config = await safeJson(response);
                     XrayManager.setBalancerTag(config.balancer_tag);
-                    const uiElements = UIManager.getElements();
-                    uiElements.balancerTag.textContent = XrayManager.getBalancerTag();
+                    UIManager.getElements().balancerTag.textContent = XrayManager.getBalancerTag();
                 }
             } catch (error) {
                 console.error('Error loading config:', error);
             }
             await this.initializePage();
         },
-        
+
         fetchOutboundList: async function() {
             try {
-                const response = await fetch('/api/outbounds');
+                var response = await fetch('/api/outbounds');
                 if (!response.ok) throw new Error('Failed to fetch outbounds');
-                const outbounds = await response.json();
+                var outbounds = await safeJson(response);
                 if (outbounds.length === 0) return [];
                 return outbounds;
             } catch (error) {
                 console.error('Error loading outbounds:', error);
-                const uiElements = UIManager.getElements();
-                uiElements.outboundsList.innerHTML = '<p class="text-red-400 text-center py-4 col-span-full">&#10060; 加载出站列表失败</p>';
+                UIManager.getElements().outboundsList.innerHTML =
+                    '<p class="text-red-400 text-center py-4 col-span-full">\u274C \u52A0\u8F7D\u51FA\u7AD9\u5217\u8868\u5931\u8D25</p>';
                 return [];
             }
         },
-        
+
         loadCurrentOutbound: async function() {
             try {
-                const response = await fetch('/api/current-outbound');
+                var response = await fetch('/api/current-outbound');
                 if (!response.ok) throw new Error('Failed to fetch current outbound');
-                const data = await response.json();
+                var data = await safeJson(response);
+                XrayManager.setPrevCurrentOutbound(XrayManager.getCurrentOutbound());
                 if (data.auto || !data.current) {
                     XrayManager.setCurrentOutbound('');
-                    const uiElements = UIManager.getElements();
-                    uiElements.currentTag.innerHTML = '<span class="text-orange-300">&#128260; 自动均衡模式</span>';
                 } else {
                     XrayManager.setCurrentOutbound(data.current);
-                    const uiElements = UIManager.getElements();
-                    uiElements.currentTag.innerHTML = '<span class="text-green-300">&#10003; ' + data.current + '</span>';
                 }
+                UIManager.updateCurrentDisplay(data.auto, data.current);
                 return data;
             } catch (error) {
                 console.error('Error loading current outbound:', error);
-                const uiElements = UIManager.getElements();
-                uiElements.currentTag.innerHTML = '<span class="text-red-300">&#10007; 获取失败</span>';
-                return { auto: false, current: '' };
+                UIManager.updateErrorDisplay();
+                return { auto: true, current: '' };
             }
         },
-        
+
         applyOutboundChange: async function(outboundTag, displayName, options) {
-            const opts = options || { reload: true };
+            var opts = options || { reload: true };
             try {
-                const response = await fetch('/api/switch-outbound', {
+                var response = await fetch('/api/switch-outbound', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ outbound_tag: outboundTag })
                 });
                 if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.error || 'Failed to apply change');
+                    var errData;
+                    try { errData = await response.json(); } catch(e) { errData = null; }
+                    throw new Error((errData && errData.error) || 'Failed to apply change');
                 }
-                NotificationManager.showNotification('&#10003; 已切换到: ' + (displayName || '自动均衡'), 'success');
+                NotificationManager.showNotification('\u2713 \u5DF2\u5207\u6362\u5230: ' + (displayName || '\u81EA\u52A8\u5747\u8861'), 'success');
                 if (opts.reload) {
-                    setTimeout(() => this.initializePage(), 500);
+                    setTimeout(function() { NetworkManager.initializePage(); }, 500);
                 }
             } catch (error) {
                 console.error('Error applying change:', error);
-                NotificationManager.showNotification('&#10007; 切换失败: ' + error.message, 'error');
+                NotificationManager.showNotification('\u2717 \u5207\u6362\u5931\u8D25: ' + error.message, 'error');
             }
         },
-        
+
         initializePage: async function() {
             XrayManager.setPageReady(false);
-            const currentStatus = await this.loadCurrentOutbound();
-            const newNodeData = await this.fetchOutboundList();
 
-            let orderedNodeData;
+            var results = await Promise.all([
+                this.loadCurrentOutbound(),
+                this.fetchOutboundList()
+            ]);
+            var currentStatus = results[0];
+            var newNodeData = results[1];
+
+            var orderedNodeData;
             if (XrayManager.getFixedNodeOrder().length === 0) {
-                console.log('First load. Sorting nodes alphabetically.');
-                newNodeData.sort((a, b) => a.tag.localeCompare(b.tag));
-                XrayManager.setFixedNodeOrder(newNodeData.map(node => node.tag));
+                newNodeData.sort(function(a, b) { return a.tag.localeCompare(b.tag); });
+                XrayManager.setFixedNodeOrder(newNodeData.map(function(n) { return n.tag; }));
                 orderedNodeData = newNodeData;
             } else {
-                console.log('Refresh load. Using fixed order:', XrayManager.getFixedNodeOrder());
-                const nodeMap = new Map(newNodeData.map(node => [node.tag, node]));
+                var nodeMap = new Map(newNodeData.map(function(n) { return [n.tag, n]; }));
                 orderedNodeData = [];
-                for (const tag of XrayManager.getFixedNodeOrder()) {
-                    const node = nodeMap.get(tag);
+                var order = XrayManager.getFixedNodeOrder();
+                for (var i = 0; i < order.length; i++) {
+                    var node = nodeMap.get(order[i]);
                     if (node) {
                         orderedNodeData.push(node);
-                        nodeMap.delete(tag);
+                        nodeMap.delete(order[i]);
                     }
                 }
-                const newNodes = Array.from(nodeMap.values());
+                var newNodes = Array.from(nodeMap.values());
                 if (newNodes.length > 0) {
-                    newNodes.sort((a, b) => a.tag.localeCompare(b.tag));
-                    orderedNodeData.push(...newNodes);
-                    XrayManager.setFixedNodeOrder([...XrayManager.getFixedNodeOrder(), ...newNodes.map(n => n.tag)]);
+                    newNodes.sort(function(a, b) { return a.tag.localeCompare(b.tag); });
+                    orderedNodeData.push.apply(orderedNodeData, newNodes);
+                    XrayManager.setFixedNodeOrder(
+                        XrayManager.getFixedNodeOrder().concat(newNodes.map(function(n) { return n.tag; }))
+                    );
                 }
             }
 
             NodeManager.renderOutboundCards(orderedNodeData);
 
-            const allStatuses = await NodeManager.progressiveLoadStatuses(orderedNodeData);
+            var allStatuses = await NodeManager.progressiveLoadStatuses(orderedNodeData);
 
-            const bestNode = NodeManager.findBestNode(allStatuses);
+            var bestNode = NodeManager.findBestNode(allStatuses);
             if (bestNode && currentStatus.auto && !XrayManager.getDidInitialAutoSelect()) {
-                console.log('自动切换到最佳节点: ' + bestNode.tag + ' (延迟: ' + bestNode.status.delay + 'ms)');
-                XrayManager.setDidInitialAutoSelect(true);
+                console.log('\u81EA\u52A8\u5207\u6362\u5230\u6700\u4F73\u8282\u70B9: ' + bestNode.tag + ' (\u5EF6\u8FDF: ' + bestNode.status.delay + 'ms)');
                 await this.applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
+                XrayManager.setDidInitialAutoSelect(true);
                 await this.loadCurrentOutbound();
                 NodeManager.renderOutboundCards(orderedNodeData);
                 await NodeManager.progressiveLoadStatuses(orderedNodeData);
@@ -299,64 +322,117 @@ const NetworkManager = (function() {
 })();
 
 function connectStatsSSE() {
-    console.log('正在连接到 /api/stats-sse...');
-    const evtSource = new EventSource('/api/stats-sse');
+    console.log('\u6B63\u5728\u8FDE\u63A5\u5230 /api/stats-sse...');
+    var evtSource = new EventSource('/api/stats-sse');
+    window._sseEventSource = evtSource;
 
-    evtSource.addEventListener('update', (event) => {
+    var statsContainer = document.getElementById('stats-container');
+    var statusBanner = document.createElement('div');
+    statusBanner.id = 'sse-status-banner';
+    statusBanner.className = 'hidden text-center text-xs py-1 rounded-t-xl transition-colors duration-300';
+    statsContainer.parentNode.insertBefore(statusBanner, statsContainer);
+
+    function setConnected(connected) {
+        if (connected) {
+            statusBanner.className = 'hidden text-center text-xs py-1 rounded-t-xl';
+            statsContainer.style.opacity = '1';
+        } else {
+            statusBanner.textContent = '\u26A0 \u5B9E\u65F6\u6570\u636E\u8FDE\u63A5\u65AD\u5F00\uFF0C\u6B63\u5728\u91CD\u8FDE...';
+            statusBanner.className = 'text-center text-xs py-1 rounded-t-xl bg-yellow-600/50 text-yellow-200';
+            statsContainer.style.opacity = '0.7';
+        }
+    }
+
+    evtSource.addEventListener('update', function(event) {
         try {
-            const data = JSON.parse(event.data);
+            var data = JSON.parse(event.data);
             UIManager.updateStatsUI(data);
             if (XrayManager.getPageReady() && data.outbounds && Array.isArray(data.outbounds)) {
                 UIManager.updateAllCardStatuses(data.outbounds);
             }
+            setConnected(true);
         } catch (error) {
-            console.error('解析 SSE 数据失败:', error);
+            console.error('\u89E3\u6790 SSE \u6570\u636E\u5931\u8D25:', error);
         }
     });
 
-    evtSource.onopen = () => {
-        console.log('SSE 连接已建立');
+    evtSource.onopen = function() {
+        console.log('SSE \u8FDE\u63A5\u5DF2\u5EFA\u7ACB');
+        setConnected(true);
     };
 
-    evtSource.onerror = () => {
-        console.warn('SSE 连接错误');
+    evtSource.onerror = function() {
+        console.warn('SSE \u8FDE\u63A5\u9519\u8BEF\uFF0C\u5C06\u81EA\u52A8\u91CD\u8FDE');
+        setConnected(false);
     };
 }
 
 const NodeManager = (function() {
     return {
         renderOutboundCards: function(allNodeData) {
-            const uiElements = UIManager.getElements();
-            uiElements.outboundsList.innerHTML = '';
+            var uiElements = UIManager.getElements();
+            var container = uiElements.outboundsList;
+            var currentChanged = XrayManager.getPrevCurrentOutbound() !== XrayManager.getCurrentOutbound();
+            XrayManager.setPrevCurrentOutbound(XrayManager.getCurrentOutbound());
+
             if (allNodeData.length === 0) {
-                uiElements.outboundsList.innerHTML = '<p class="text-white/70 text-center py-4 col-span-full">未找到可用出站</p>';
+                container.innerHTML = '<p class="text-white/70 text-center py-4 col-span-full">\u672A\u627E\u5230\u53EF\u7528\u51FA\u7AD9</p>';
                 return;
             }
-            for (const node of allNodeData) {
-                if (node) {
-                    uiElements.outboundsList.appendChild(this.createOutboundCard(node));
+
+            if (currentChanged) {
+                container.innerHTML = '';
+                for (var i = 0; i < allNodeData.length; i++) {
+                    if (allNodeData[i]) {
+                        container.appendChild(this.createOutboundCard(allNodeData[i]));
+                    }
+                }
+                return;
+            }
+
+            var existingCards = {};
+            var cardEls = container.querySelectorAll('[data-tag]');
+            for (var j = 0; j < cardEls.length; j++) {
+                existingCards[cardEls[j].getAttribute('data-tag')] = cardEls[j];
+            }
+
+            for (var k = 0; k < allNodeData.length; k++) {
+                var node = allNodeData[k];
+                if (!node) continue;
+                var card = existingCards[node.tag];
+                if (card) {
+                    container.appendChild(card);
+                    delete existingCards[node.tag];
+                } else {
+                    container.appendChild(this.createOutboundCard(node));
                 }
             }
+
+            var tags = Object.keys(existingCards);
+            for (var m = 0; m < tags.length; m++) {
+                container.removeChild(existingCards[tags[m]]);
+            }
         },
-        
+
         progressiveLoadStatuses: async function(nodes) {
-            const statusMap = new Map();
+            var statusMap = new Map();
             try {
-                const res = await fetch('/api/outbounds-status');
+                var res = await fetch('/api/outbounds-status');
                 if (res.ok) {
-                    const allStatuses = await res.json();
-                    for (const st of allStatuses) {
+                    var allStatuses = await res.json();
+                    for (var i = 0; i < allStatuses.length; i++) {
+                        var st = allStatuses[i];
                         if (st && st.tag) {
                             statusMap.set(st.tag, st);
                         }
                     }
                 }
             } catch (e) {
-                console.error('批量加载状态失败:', e);
+                console.error('\u6279\u91CF\u52A0\u8F7D\u72B6\u6001\u5931\u8D25:', e);
             }
 
-            const results = nodes.map((node) => {
-                let status = statusMap.get(node.tag);
+            var results = nodes.map(function(node) {
+                var status = statusMap.get(node.tag);
                 if (!status) {
                     status = { alive: false, delay: 0, error: 'not_found' };
                 }
@@ -365,71 +441,84 @@ const NodeManager = (function() {
             });
             return results;
         },
-        
+
         findBestNode: function(allStatuses) {
-            let bestNode = null;
-            let minDelay = Infinity;
-            for (const nodeStatus of allStatuses) {
-                if (nodeStatus && nodeStatus.status && nodeStatus.status.alive && nodeStatus.status.delay > 0) {
-                    if (nodeStatus.status.delay < minDelay) {
-                        minDelay = nodeStatus.status.delay;
-                        bestNode = nodeStatus;
+            var bestNode = null;
+            var minDelay = Infinity;
+            for (var i = 0; i < allStatuses.length; i++) {
+                var ns = allStatuses[i];
+                if (ns && ns.status && ns.status.alive && ns.status.delay > 0) {
+                    if (ns.status.delay < minDelay) {
+                        minDelay = ns.status.delay;
+                        bestNode = ns;
                     }
                 }
             }
             return bestNode;
         },
-        
-        createOutboundCard: function(node) {
-            const tag = node.tag;
-            const protocol = (node.protocol || 'unknown').toUpperCase();
-            const isCurrent = tag === XrayManager.getCurrentOutbound();
 
-            const card = document.createElement('div');
+        createOutboundCard: function(node) {
+            var tag = node.tag;
+            var protocol = (node.protocol || 'unknown').toUpperCase();
+            var isCurrent = tag === XrayManager.getCurrentOutbound();
+
+            var card = document.createElement('div');
             card.setAttribute('data-tag', tag);
+            card.setAttribute('tabindex', '0');
+            card.setAttribute('role', 'button');
+            card.setAttribute('aria-label', '\u5207\u6362\u5230\u8282\u70B9 ' + tag);
             card.className = 'card-hover bg-white/10 backdrop-blur p-4 rounded-xl shadow-lg border ' +
                 (isCurrent ? 'border-cyan-400 current-indicator' : 'border-white/20');
 
-            const inner = document.createElement('div');
+            var inner = document.createElement('div');
             inner.className = 'relative';
 
             if (isCurrent) {
-                const badge = document.createElement('div');
+                var badge = document.createElement('div');
                 badge.className = 'absolute top-2 right-2 bg-cyan-500/90 text-white px-2 py-1 rounded-md text-xs font-bold flex items-center gap-1';
-                badge.innerHTML = '<span class="pulse-ring">&#9679;</span> 当前';
+                var dot = document.createElement('span');
+                dot.className = 'pulse-ring';
+                dot.textContent = '\u25CF';
+                badge.appendChild(dot);
+                badge.appendChild(document.createTextNode(' \u5F53\u524D'));
                 inner.appendChild(badge);
+                card.style.cursor = 'default';
             }
 
-            const body = document.createElement('div');
+            var body = document.createElement('div');
             body.className = 'mb-3';
 
-            const tagDiv = document.createElement('div');
+            var tagDiv = document.createElement('div');
             tagDiv.className = 'font-mono text-lg font-bold text-white mb-1 truncate';
             tagDiv.textContent = tag;
             tagDiv.title = tag;
 
-            const protoDiv = document.createElement('div');
+            var protoDiv = document.createElement('div');
             protoDiv.className = 'text-xs text-cyan-200 font-semibold mb-2';
             protoDiv.textContent = protocol;
 
             body.appendChild(tagDiv);
             body.appendChild(protoDiv);
 
-            const statusDiv = document.createElement('div');
+            var statusDiv = document.createElement('div');
             statusDiv.id = 'status-' + tag;
             statusDiv.className = 'flex items-center gap-2 text-xs text-white/70';
-            statusDiv.innerHTML = '&#9675; 正在 PING...';
+            statusDiv.textContent = '\u25CB \u6B63\u5728 PING...';
 
             inner.appendChild(body);
             inner.appendChild(statusDiv);
             card.appendChild(inner);
 
             if (!isCurrent) {
-                card.addEventListener('click', () => {
+                card.addEventListener('click', function() {
                     NetworkManager.applyOutboundChange(tag, tag, { reload: true });
                 });
-            } else {
-                card.style.cursor = 'default';
+                card.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        NetworkManager.applyOutboundChange(tag, tag, { reload: true });
+                    }
+                });
             }
 
             return card;
@@ -437,25 +526,27 @@ const NodeManager = (function() {
     };
 })();
 
-// 格式化函数保持不变
-function formatBytes(bytes, decimals = 0) {
+function formatBytes(bytes, decimals) {
+    if (decimals === undefined) decimals = 0;
+    if (typeof bytes !== 'number' || isNaN(bytes)) return '0 Bytes';
     if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    var k = 1024;
+    var sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
 }
 
 function formatDuration(totalSeconds) {
+    if (typeof totalSeconds !== 'number' || isNaN(totalSeconds)) return '0s';
     if (totalSeconds <= 0) return '0s';
-    let remaining = totalSeconds;
-    const days = Math.floor(remaining / 86400);
+    var remaining = totalSeconds;
+    var days = Math.floor(remaining / 86400);
     remaining %= 86400;
-    const hours = Math.floor(remaining / 3600);
+    var hours = Math.floor(remaining / 3600);
     remaining %= 3600;
-    const minutes = Math.floor(remaining / 60);
-    const seconds = remaining % 60;
-    let result = '';
+    var minutes = Math.floor(remaining / 60);
+    var seconds = remaining % 60;
+    var result = '';
     if (days > 0) result += days + 'd ';
     if (hours > 0) result += hours + 'h ';
     if (minutes > 0) result += minutes + 'm ';

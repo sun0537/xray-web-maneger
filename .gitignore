@@ -18,6 +18,6 @@
 .vscode/
 .idea/
 .trae/
-
+.qoder/
 __debug_bin*
 xray-web-manager

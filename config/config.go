@@ -12,48 +12,44 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config 配置文件结构
-type Config struct {
-	Server struct {
-		Host           string   `yaml:"host"`            // 监听地址
-		Port           string   `yaml:"port"`            // 监听端口
-		AllowedOrigins []string `yaml:"allowed_origins"` // (可选) 允许访问的来源 (用于安全检查)
-	} `yaml:"server"`
-	Xray struct {
-		ApiAddr     string `yaml:"api_addr"`     // Xray gRPC 地址
-		BalancerTag string `yaml:"balancer_tag"` // 负载均衡器标签
-	} `yaml:"xray"`
-	Auth struct {
-		Username string `yaml:"username"`
-		Password string `yaml:"password"`
-	} `yaml:"auth"`
+// ServerConfig holds the HTTP server configuration.
+type ServerConfig struct {
+	Host           string   `yaml:"host"`            // 监听地址
+	Port           string   `yaml:"port"`            // 监听端口
+	AllowedOrigins []string `yaml:"allowed_origins"` // (可选) 允许访问的来源 (用于安全检查)
 }
 
-// 默认配置
-var defaultConfig = Config{
-	Server: struct {
-		Host           string   `yaml:"host"`
-		Port           string   `yaml:"port"`
-		AllowedOrigins []string `yaml:"allowed_origins"`
-	}{
-		Host:           "0.0.0.0",
-		Port:           "8080",
-		AllowedOrigins: []string{},
-	},
-	Xray: struct {
-		ApiAddr     string `yaml:"api_addr"`
-		BalancerTag string `yaml:"balancer_tag"`
-	}{
-		ApiAddr:     "localhost:10085",
-		BalancerTag: "balancer",
-	},
-	Auth: struct {
-		Username string `yaml:"username"`
-		Password string `yaml:"password"`
-	}{
-		Username: "",
-		Password: "",
-	},
+// XrayConfig holds the Xray gRPC API connection configuration.
+type XrayConfig struct {
+	ApiAddr     string `yaml:"api_addr"`     // Xray gRPC 地址
+	BalancerTag string `yaml:"balancer_tag"` // 负载均衡器标签
+}
+
+// AuthConfig holds the HTTP Basic Auth credentials.
+type AuthConfig struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// Config 配置文件结构
+type Config struct {
+	Server ServerConfig `yaml:"server"`
+	Xray   XrayConfig   `yaml:"xray"`
+	Auth   AuthConfig   `yaml:"auth"`
+}
+
+// newDefaultConfig returns an immutable copy of the default configuration.
+func newDefaultConfig() Config {
+	return Config{
+		Server: ServerConfig{
+			Host: "0.0.0.0",
+			Port: "8080",
+		},
+		Xray: XrayConfig{
+			ApiAddr:     "localhost:10085",
+			BalancerTag: "balancer",
+		},
+	}
 }
 
 func GetConfigPath(configPath string) (string, error) {
@@ -73,7 +69,8 @@ func GetConfigPath(configPath string) (string, error) {
 }
 
 func LoadConfig(filename string) (Config, error) {
-	config := defaultConfig
+	defaultCfg := newDefaultConfig()
+	config := defaultCfg
 
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -88,18 +85,16 @@ func LoadConfig(filename string) (Config, error) {
 	}
 
 	if err := yaml.Unmarshal(data, &config); err != nil {
-		return defaultConfig, fmt.Errorf("解析配置文件失败: %w", err)
+		return newDefaultConfig(), fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
-	// 填充默认值
-	applyDefault(&config.Server.Host, defaultConfig.Server.Host)
-	applyDefault(&config.Server.Port, defaultConfig.Server.Port)
-	applyDefault(&config.Xray.ApiAddr, defaultConfig.Xray.ApiAddr)
-	applyDefault(&config.Xray.BalancerTag, defaultConfig.Xray.BalancerTag)
+	applyDefault(&config.Server.Host, defaultCfg.Server.Host)
+	applyDefault(&config.Server.Port, defaultCfg.Server.Port)
+	applyDefault(&config.Xray.ApiAddr, defaultCfg.Xray.ApiAddr)
+	applyDefault(&config.Xray.BalancerTag, defaultCfg.Xray.BalancerTag)
 
-	// 验证配置
 	if err := ValidateConfig(config); err != nil {
-		return defaultConfig, fmt.Errorf("配置验证失败: %w", err)
+		return newDefaultConfig(), fmt.Errorf("配置验证失败: %w", err)
 	}
 
 	log.Printf("配置已加载: %s:%s", config.Server.Host, config.Server.Port)
@@ -117,9 +112,7 @@ func applyDefault(field *string, defaultVal string) {
 	}
 }
 
-// ValidateConfig 验证配置合法性
 func ValidateConfig(config Config) error {
-	// 验证端口号
 	port, err := strconv.Atoi(config.Server.Port)
 	if err != nil {
 		return fmt.Errorf("无效的端口号: %s", config.Server.Port)
@@ -128,22 +121,18 @@ func ValidateConfig(config Config) error {
 		return fmt.Errorf("端口号超出范围 (1-65535): %d", port)
 	}
 
-	// 验证 API 地址格式
 	if config.Xray.ApiAddr == "" {
 		return fmt.Errorf("xray API 地址不能为空")
 	}
 
-	// 验证负载均衡器标签
 	if config.Xray.BalancerTag == "" {
 		return fmt.Errorf("负载均衡器标签不能为空")
 	}
 
-	// 添加对 ApiAddr 格式的验证
 	if !strings.Contains(config.Xray.ApiAddr, ":") {
 		return fmt.Errorf("无效的 API 地址格式，应为 host:port")
 	}
 
-	// 验证 AllowedOrigins 格式
 	for _, origin := range config.Server.AllowedOrigins {
 		if _, err := url.Parse(origin); err != nil {
 			return fmt.Errorf("无效的 Origin: %s", origin)
@@ -153,9 +142,8 @@ func ValidateConfig(config Config) error {
 	return nil
 }
 
-// SaveDefaultConfig 保存默认配置文件
 func SaveDefaultConfig(filename string) error {
-	data, err := yaml.Marshal(defaultConfig)
+	data, err := yaml.Marshal(newDefaultConfig())
 	if err != nil {
 		return err
 	}

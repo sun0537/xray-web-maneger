@@ -7,5 +7,5 @@ xray:
     api_addr: localhost:10085
     balancer_tag: balancer
 auth:                    # 新增：可选 Basic Auth
-  username: ""       # 不设置则不启用认证
-  password: ""
+  username: "admin"       # 不设置则不启用认证
+  password: "200"

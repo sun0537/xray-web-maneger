@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
@@ -27,26 +27,9 @@ import (
 var frontendFS embed.FS
 
 var devMode = flag.Bool("dev", false, "开发模式：使用外部文件而不是嵌入文件")
-var configPath = flag.String("c,config", "", "指定配置文件路径 (config.yaml)")
-
-var startTime time.Time
+var configPath = flag.String("config", "", "指定配置文件路径 (config.yaml)")
 
 func main() {
-	startTime = time.Now()
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Xray Web Manager: 一个用于切换 Xray 出站节点的 Web 管理面板。\n\n")
-		fmt.Fprintf(os.Stderr, "用法 (Usage):\n")
-		fmt.Fprintf(os.Stderr, "  xray-web-manager [flags]\n")
-		fmt.Fprintf(os.Stderr, "可用标志 (Flags):\n")
-		fmt.Fprintf(os.Stderr, "  -h, --help\n")
-		fmt.Fprintf(os.Stderr, "        显示帮助信息\n")
-		fmt.Fprintf(os.Stderr, "  -c, --config string\n")
-		fmt.Fprintf(os.Stderr, "        指定配置文件路径 (config.yaml)\n")
-		fmt.Fprintf(os.Stderr, "  -dev\n")
-		fmt.Fprintf(os.Stderr, "        开发模式：使用外部文件而不是嵌入文件\n")
-		fmt.Fprintf(os.Stderr, "\n默认行为:\n")
-		fmt.Fprintf(os.Stderr, "  如果不带任何标志运行，程序将自动查找并使用可执行文件目录下的 'config.yaml' 文件。\n")
-	}
 	flag.Parse()
 
 	finalConfigPath, err := config.GetConfigPath(*configPath)
@@ -71,6 +54,10 @@ func main() {
 				Timeout:             10 * time.Second,
 				PermitWithoutStream: true,
 			}),
+			grpc.WithConnectParams(grpc.ConnectParams{
+				Backoff:           backoff.DefaultConfig,
+				MinConnectTimeout: 2 * time.Second,
+			}),
 		)
 		if err == nil {
 			break
@@ -87,7 +74,7 @@ func main() {
 	log.Println("已成功连接到 Xray gRPC API")
 
 	sseMgr := sse.NewManager()
-	srv := server.NewServer(cfg, conn, sseMgr, startTime)
+	srv := server.NewServer(cfg, conn, sseMgr, time.Now())
 
 	mainMux := http.NewServeMux()
 	apiMux := http.NewServeMux()
@@ -99,6 +86,7 @@ func main() {
 	server.RegisterFrontend(mainMux, *devMode, frontendFS)
 
 	var finalHandler http.Handler = mainMux
+	finalHandler = middleware.SecurityHeaders(finalHandler)
 	finalHandler = middleware.BasicAuth(cfg.Auth.Username, cfg.Auth.Password)(finalHandler)
 	finalHandler = middleware.Logger(finalHandler)
 	finalHandler = middleware.Recovery(finalHandler)

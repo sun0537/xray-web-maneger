@@ -30,10 +30,13 @@ type Server struct {
 	sseManager        *sse.Manager
 	broadcaster       *sse.Broadcaster
 	startTime         time.Time
+	shutdownCtx       context.Context
+	shutdownCancel    context.CancelFunc
 }
 
 // NewServer 是一个构造函数，用于创建 Server 实例
 func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, startTime time.Time) *Server {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	s := &Server{
 		config:            cfg,
 		handlerClient:     handlerpb.NewHandlerServiceClient(conn),
@@ -42,10 +45,12 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 		statsClient:       statspb.NewStatsServiceClient(conn),
 		sseManager:        sseMgr,
 		startTime:         startTime,
+		shutdownCtx:       shutdownCtx,
+		shutdownCancel:    shutdownCancel,
 	}
 
 	s.broadcaster = sse.NewBroadcaster(func() ([]byte, error) {
-		stats, err := s.getCombinedStats(context.Background())
+		stats, err := s.getCombinedStats(s.shutdownCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -71,6 +76,8 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 
 // Shutdown 封装了服务关闭时的清理逻辑
 func (s *Server) Shutdown() {
+	log.Println("正在取消广播器上下文...")
+	s.shutdownCancel()
 	log.Println("正在关闭 SSE 广播器...")
 	s.broadcaster.Stop()
 	log.Println("正在关闭 SSE 管理器...")

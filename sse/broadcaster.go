@@ -16,6 +16,7 @@ type Broadcaster struct {
 	interval    time.Duration
 	stopCh      chan struct{}
 	stopped     bool
+	lastData    []byte
 }
 
 // NewBroadcaster creates a Broadcaster. fetchFn is called every interval;
@@ -66,7 +67,12 @@ func (b *Broadcaster) Subscribe() chan []byte {
 	b.subscribers[ch] = struct{}{}
 	if wasEmpty {
 		b.stopCh = make(chan struct{})
+		if b.lastData != nil {
+			ch <- b.lastData
+		}
 		go b.loop(b.stopCh)
+	} else if b.lastData != nil {
+		ch <- b.lastData
 	}
 	return ch
 }
@@ -111,6 +117,7 @@ func (b *Broadcaster) loop(stopCh chan struct{}) {
 			lastHash = h
 
 			b.mu.Lock()
+			b.lastData = data
 			for ch := range b.subscribers {
 				select {
 				case ch <- data:

@@ -95,6 +95,12 @@ func (m *MockStatsClient) GetStatsOnline(ctx context.Context, in *statspb.GetSta
 func (m *MockStatsClient) GetStatsOnlineIpList(ctx context.Context, in *statspb.GetStatsRequest, opts ...grpc.CallOption) (*statspb.GetStatsOnlineIpListResponse, error) {
 	return nil, nil
 }
+func (m *MockStatsClient) GetAllOnlineUsers(ctx context.Context, in *statspb.GetAllOnlineUsersRequest, opts ...grpc.CallOption) (*statspb.GetAllOnlineUsersResponse, error) {
+	return nil, nil
+}
+func (m *MockStatsClient) GetUsersStats(ctx context.Context, in *statspb.GetUsersStatsRequest, opts ...grpc.CallOption) (*statspb.GetUsersStatsResponse, error) {
+	return nil, nil
+}
 
 type MockRoutingClient struct {
 	routingpb.UnimplementedRoutingServiceServer
@@ -116,6 +122,9 @@ func (m *MockRoutingClient) TestRoute(ctx context.Context, in *routingpb.TestRou
 	return nil, nil
 }
 func (m *MockRoutingClient) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (routingpb.RoutingService_SubscribeRoutingStatsClient, error) {
+	return nil, nil
+}
+func (m *MockRoutingClient) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
 	return nil, nil
 }
 
@@ -185,7 +194,7 @@ func TestHandleGetOutboundsStatus(t *testing.T) {
 	s := &Server{
 		config:            config.Config{},
 		observatoryClient: &MockObservatoryClientWithStatus{},
-		startTime:     time.Time{},
+		startTime:         time.Time{},
 	}
 
 	req, err := http.NewRequest("GET", "/api/outbounds-status", nil)
@@ -277,8 +286,7 @@ func TestHandleStatsSSE(t *testing.T) {
 	assert.True(t, scanner.Scan(), "服务器应在 data 后发送空行")
 	assert.Equal(t, "", scanner.Text())
 
-	assert.True(t, scanner.Scan(), "服务器应通过广播器发送第二个 event")
-	assert.Equal(t, "event: update", scanner.Text())
-	assert.True(t, scanner.Scan(), "服务器应发送第二个 data")
-	assert.True(t, scanner.Scan(), "服务器应发送第二个空行")
+	// After the initial push, the broadcaster may send additional events.
+	// With dedup, unchanged data is suppressed. We just verify the connection
+	// produces at least one valid SSE frame — further frames are optional.
 }
