@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	observatorypb "xray-web-manager/internal/xray-proto/app/observatory/command"
@@ -182,13 +183,6 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		errorMsg := "仅支持 POST 方法"
-		log.Printf("切换出站失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
-		jsonError(w, errorMsg, http.StatusMethodNotAllowed)
-		return
-	}
-
 	var reqBody struct {
 		OutboundTag string `json:"outbound_tag"`
 	}
@@ -310,18 +304,40 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	stats := StatsData{}
 
-	// Reuse a single context for all gRPC calls to avoid per-call context allocations
 	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
 
-	queryResp, err := s.statsClient.QueryStats(gCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
-	if err != nil {
+	var (
+		wg            sync.WaitGroup
+		queryResp     *statspb.QueryStatsResponse
+		sysResp       *statspb.SysStatsResponse
+		outboundStats []OutboundStatusData
+		queryErr      error
+		sysErr        error
+	)
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		queryResp, queryErr = s.statsClient.QueryStats(gCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
+	}()
+	go func() {
+		defer wg.Done()
+		sysResp, sysErr = s.statsClient.GetSysStats(gCtx, &statspb.SysStatsRequest{})
+	}()
+	go func() {
+		defer wg.Done()
+		outboundStats = s.getAllOutboundStatuses(gCtx)
+	}()
+	wg.Wait()
+
+	if queryErr != nil {
 		errorType := "permanent"
-		if isTemporaryError(err) {
+		if isTemporaryError(queryErr) {
 			errorType = "temporary"
 		}
-		log.Printf("QueryStats 错误 [类型: %s, 上下文: inbound流量统计]: %v", errorType, err)
-	} else {
+		log.Printf("QueryStats 错误 [类型: %s, 上下文: inbound流量统计]: %v", errorType, queryErr)
+	} else if queryResp != nil {
 		for _, stat := range queryResp.Stat {
 			if strings.HasSuffix(stat.Name, ">>>traffic>>>uplink") {
 				stats.Uplink += stat.Value
@@ -331,20 +347,19 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 		}
 	}
 
-	sysResp, err := s.statsClient.GetSysStats(gCtx, &statspb.SysStatsRequest{})
-	if err != nil {
+	if sysErr != nil {
 		errorType := "permanent"
-		if isTemporaryError(err) {
+		if isTemporaryError(sysErr) {
 			errorType = "temporary"
 		}
-		log.Printf("GetSysStats 错误 [类型: %s, 上下文: 系统统计]: %v", errorType, err)
+		log.Printf("GetSysStats 错误 [类型: %s, 上下文: 系统统计]: %v", errorType, sysErr)
 	} else if sysResp != nil {
 		stats.Uptime = int64(sysResp.GetUptime())
 		stats.SysMem = sysResp.GetSys()
 		stats.Goroutines = int(sysResp.GetNumGoroutine())
 	}
 
-	stats.Outbounds = s.getAllOutboundStatuses(gCtx)
+	stats.Outbounds = outboundStats
 	return stats, nil
 }
 
@@ -385,18 +400,12 @@ func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusDat
 	return result
 }
 
-func jsonResponse(w http.ResponseWriter, data interface{}, statusCode int) {
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		log.Printf("JSON 序列化失败: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"internal server error"}`))
-		return
-	}
+func jsonResponse(w http.ResponseWriter, data any, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	w.Write(jsonData)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("JSON 写入失败: %v", err)
+	}
 }
 
 func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -421,7 +430,6 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func jsonError(w http.ResponseWriter, message string, statusCode int) {
-	// 分类错误类型
 	errorType := "unknown"
 	if strings.Contains(message, "连接") || strings.Contains(message, "网络") {
 		errorType = "network"
@@ -436,5 +444,7 @@ func jsonError(w http.ResponseWriter, message string, statusCode int) {
 	}
 
 	log.Printf("API Error [类型: %s, 状态码: %d]: %s", errorType, statusCode, message)
-	jsonResponse(w, ErrorResponse{Error: message, ErrorType: errorType}, statusCode)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(ErrorResponse{Error: message, ErrorType: errorType})
 }

@@ -218,6 +218,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 
 func BasicAuth(username, password string) func(http.Handler) http.Handler {
 	if username == "" || password == "" {
+		log.Println("警告: BasicAuth 未配置 (username/password 为空)，API 将不进行认证保护")
 		return func(next http.Handler) http.Handler { return next }
 	}
 

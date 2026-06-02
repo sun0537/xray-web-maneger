@@ -63,15 +63,14 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 
 // RegisterHandlers 负责注册所有路由
 func (s *Server) RegisterHandlers(mux *http.ServeMux) {
-	// API 路由
-	mux.HandleFunc("/api/health", s.handleHealthCheck)
-	mux.HandleFunc("/api/config", s.handleGetConfig)
-	mux.HandleFunc("/api/outbounds", s.handleGetOutbounds)
-	mux.HandleFunc("/api/outbound-status", s.handleGetOutboundStatus)
-	mux.HandleFunc("/api/outbounds-status", s.handleGetOutboundsStatus)
-	mux.HandleFunc("/api/current-outbound", s.handleGetCurrentOutbound)
-	mux.HandleFunc("/api/stats-sse", s.handleStatsSSE)
-	mux.HandleFunc("/api/switch-outbound", s.handleSwitchOutbound)
+	mux.HandleFunc("GET /api/health", s.handleHealthCheck)
+	mux.HandleFunc("GET /api/config", s.handleGetConfig)
+	mux.HandleFunc("GET /api/outbounds", s.handleGetOutbounds)
+	mux.HandleFunc("GET /api/outbound-status", s.handleGetOutboundStatus)
+	mux.HandleFunc("GET /api/outbounds-status", s.handleGetOutboundsStatus)
+	mux.HandleFunc("GET /api/current-outbound", s.handleGetCurrentOutbound)
+	mux.HandleFunc("GET /api/stats-sse", s.handleStatsSSE)
+	mux.HandleFunc("POST /api/switch-outbound", s.handleSwitchOutbound)
 }
 
 // Shutdown 封装了服务关闭时的清理逻辑

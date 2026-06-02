@@ -14,6 +14,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
@@ -44,34 +45,41 @@ func main() {
 
 	log.Printf("正在连接到 Xray gRPC API: %s", cfg.Xray.ApiAddr)
 
-	var conn *grpc.ClientConn
-	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
-		conn, err = grpc.NewClient(cfg.Xray.ApiAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                30 * time.Second,
-				Timeout:             10 * time.Second,
-				PermitWithoutStream: true,
-			}),
-			grpc.WithConnectParams(grpc.ConnectParams{
-				Backoff:           backoff.DefaultConfig,
-				MinConnectTimeout: 2 * time.Second,
-			}),
-		)
-		if err == nil {
-			break
-		}
-		log.Printf("连接失败 (尝试 %d/%d): %v", i+1, maxRetries, err)
-		time.Sleep(time.Second * 2)
-	}
-
+	conn, err := grpc.NewClient(cfg.Xray.ApiAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoff.DefaultConfig,
+			MinConnectTimeout: 2 * time.Second,
+		}),
+	)
 	if err != nil {
-		log.Fatalf("无法连接到 Xray gRPC (已尝试 %d 次): %v", maxRetries, err)
+		log.Fatalf("无法创建 gRPC 客户端: %v", err)
 	}
 	defer conn.Close()
 
-	log.Println("已成功连接到 Xray gRPC API")
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		conn.Connect()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if conn.WaitForStateChange(ctx, connectivity.Idle) {
+			state := conn.GetState()
+			cancel()
+			if state == connectivity.Ready || state == connectivity.Connecting {
+				break
+			}
+		} else {
+			cancel()
+		}
+		log.Printf("连接失败 (尝试 %d/%d): 当前状态 %s", i+1, maxRetries, conn.GetState())
+		time.Sleep(2 * time.Second)
+	}
+
+	log.Println("已创建 gRPC 客户端连接")
 
 	sseMgr := sse.NewManager()
 	srv := server.NewServer(cfg, conn, sseMgr, time.Now())
@@ -87,11 +95,14 @@ func main() {
 
 	var finalHandler http.Handler = mainMux
 	finalHandler = middleware.SecurityHeaders(finalHandler)
+	finalHandler = middleware.RateLimit(finalHandler)
 	finalHandler = middleware.BasicAuth(cfg.Auth.Username, cfg.Auth.Password)(finalHandler)
 	finalHandler = middleware.Logger(finalHandler)
 	finalHandler = middleware.Recovery(finalHandler)
 
 	addr := net.JoinHostPort(cfg.Server.Host, cfg.Server.Port)
+	// WriteTimeout 故意不设置，因为 SSE 端点需要长时间保持连接写入数据。
+	// 非 SSE 路由的超时通过 context.WithTimeout 在各 handler 内部控制。
 	httpServer := &http.Server{
 		Addr:        addr,
 		Handler:     finalHandler,

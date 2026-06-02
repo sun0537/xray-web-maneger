@@ -78,28 +78,48 @@ const UIManager = (function() {
 
         performUIUpdate: function(statusEl, status) {
             if (status && status.error !== 'not_found' && status.error !== 'fetch_failed') {
-                const alive = status.alive;
-                const delay = status.delay;
+                var alive = status.alive;
+                var delay = status.delay;
+                statusEl.innerHTML = '';
                 if (alive && (delay === undefined || delay === null || delay === 0)) {
-                    statusEl.innerHTML = '<span class="flex h-2 w-2 relative">' +
-                        '<span class="animate-pulse absolute inline-flex h-2 w-2 rounded-full bg-yellow-500 opacity-75"></span>' +
-                        '<span class="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>' +
-                        '</span>' +
-                        '<span class="font-mono font-semibold text-yellow-400">\u68C0\u6D4B\u4E2D...</span>';
                     statusEl.className = 'flex items-center gap-2 text-xs text-yellow-400';
+                    var pulseWrap = document.createElement('span');
+                    pulseWrap.className = 'flex h-2 w-2 relative';
+                    var pulseAnim = document.createElement('span');
+                    pulseAnim.className = 'animate-pulse absolute inline-flex h-2 w-2 rounded-full bg-yellow-500 opacity-75';
+                    var pulseDot = document.createElement('span');
+                    pulseDot.className = 'relative inline-flex rounded-full h-2 w-2 bg-yellow-500';
+                    pulseWrap.appendChild(pulseAnim);
+                    pulseWrap.appendChild(pulseDot);
+                    var label = document.createElement('span');
+                    label.className = 'font-mono font-semibold text-yellow-400';
+                    label.textContent = '\u68C0\u6D4B\u4E2D...';
+                    statusEl.appendChild(pulseWrap);
+                    statusEl.appendChild(label);
                     return;
                 }
-                const color = alive ? 'bg-green-500' : 'bg-red-500';
-                const statusColor = alive ? 'text-green-400' : 'text-red-400';
-                statusEl.innerHTML = '<span class="flex h-2 w-2 relative">' +
-                    '<span class="animate-ping absolute inline-flex h-2 w-2 rounded-full ' + color + ' opacity-75"></span>' +
-                    '<span class="relative inline-flex rounded-full h-2 w-2 ' + color + '"></span>' +
-                    '</span>' +
-                    '<span class="font-mono font-semibold">' + (delay || 0) + ' ms</span>';
+                var color = alive ? 'bg-green-500' : 'bg-red-500';
+                var statusColor = alive ? 'text-green-400' : 'text-red-400';
                 statusEl.className = 'flex items-center gap-2 text-xs ' + statusColor;
+                var pingWrap = document.createElement('span');
+                pingWrap.className = 'flex h-2 w-2 relative';
+                var pingAnim = document.createElement('span');
+                pingAnim.className = 'animate-ping absolute inline-flex h-2 w-2 rounded-full ' + color + ' opacity-75';
+                var pingDot = document.createElement('span');
+                pingDot.className = 'relative inline-flex rounded-full h-2 w-2 ' + color;
+                pingWrap.appendChild(pingAnim);
+                pingWrap.appendChild(pingDot);
+                var delayLabel = document.createElement('span');
+                delayLabel.className = 'font-mono font-semibold';
+                delayLabel.textContent = (delay || 0) + ' ms';
+                statusEl.appendChild(pingWrap);
+                statusEl.appendChild(delayLabel);
             } else {
-                statusEl.innerHTML = '<span>&#9675; \u68C0\u6D4B\u5931\u8D25</span>';
+                statusEl.innerHTML = '';
                 statusEl.className = 'flex items-center gap-2 text-xs text-white/70';
+                var failLabel = document.createElement('span');
+                failLabel.textContent = '\u25CB \u68C0\u6D4B\u5931\u8D25';
+                statusEl.appendChild(failLabel);
             }
         },
 
@@ -329,18 +349,20 @@ function connectStatsSSE() {
     var statsContainer = document.getElementById('stats-container');
     var statusBanner = document.createElement('div');
     statusBanner.id = 'sse-status-banner';
-    statusBanner.className = 'hidden text-center text-xs py-1 rounded-t-xl transition-colors duration-300';
+    statusBanner.style.display = 'none';
+    statusBanner.className = 'text-center text-xs py-1 rounded-t-xl transition-colors duration-300';
     statsContainer.parentNode.insertBefore(statusBanner, statsContainer);
 
-    function setConnected(connected) {
-        if (connected) {
-            statusBanner.className = 'hidden text-center text-xs py-1 rounded-t-xl';
-            statsContainer.style.opacity = '1';
-        } else {
-            statusBanner.textContent = '\u26A0 \u5B9E\u65F6\u6570\u636E\u8FDE\u63A5\u65AD\u5F00\uFF0C\u6B63\u5728\u91CD\u8FDE...';
-            statusBanner.className = 'text-center text-xs py-1 rounded-t-xl bg-yellow-600/50 text-yellow-200';
-            statsContainer.style.opacity = '0.7';
-        }
+    function hideBanner() {
+        statusBanner.style.display = 'none';
+        statsContainer.style.opacity = '1';
+    }
+
+    function showBanner() {
+        statusBanner.textContent = '\u26A0 \u5B9E\u65F6\u6570\u636E\u8FDE\u63A5\u65AD\u5F00\uFF0C\u6B63\u5728\u91CD\u8FDE...';
+        statusBanner.style.display = '';
+        statusBanner.className = 'text-center text-xs py-1 rounded-t-xl bg-yellow-600/50 text-yellow-200';
+        statsContainer.style.opacity = '0.7';
     }
 
     evtSource.addEventListener('update', function(event) {
@@ -350,7 +372,7 @@ function connectStatsSSE() {
             if (XrayManager.getPageReady() && data.outbounds && Array.isArray(data.outbounds)) {
                 UIManager.updateAllCardStatuses(data.outbounds);
             }
-            setConnected(true);
+            hideBanner();
         } catch (error) {
             console.error('\u89E3\u6790 SSE \u6570\u636E\u5931\u8D25:', error);
         }
@@ -358,12 +380,21 @@ function connectStatsSSE() {
 
     evtSource.onopen = function() {
         console.log('SSE \u8FDE\u63A5\u5DF2\u5EFA\u7ACB');
-        setConnected(true);
+        hideBanner();
     };
 
     evtSource.onerror = function() {
-        console.warn('SSE \u8FDE\u63A5\u9519\u8BEF\uFF0C\u5C06\u81EA\u52A8\u91CD\u8FDE');
-        setConnected(false);
+        if (evtSource.readyState === EventSource.CLOSED) {
+            console.warn('SSE \u8FDE\u63A5\u5DF2\u5173\u95ED');
+            showBanner();
+        } else {
+            console.warn('SSE \u8FDE\u63A5\u9519\u8BEF\uFF0C\u7B49\u5F85\u91CD\u8FDE...');
+            setTimeout(function() {
+                if (evtSource.readyState !== EventSource.OPEN) {
+                    showBanner();
+                }
+            }, 1000);
+        }
     };
 }
 
