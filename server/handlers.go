@@ -167,7 +167,7 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		errorMsg := fmt.Sprintf("获取负载均衡器信息失败: %v", err)
 		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %s", s.config.Xray.BalancerTag, r.RemoteAddr, errorMsg)
-		jsonResponse(w, CurrentOutboundData{Current: "", Auto: true}, http.StatusOK)
+		jsonError(w, errorMsg, http.StatusBadGateway)
 		return
 	}
 
@@ -193,11 +193,26 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 		OutboundTag string `json:"outbound_tag"`
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 		errorMsg := fmt.Sprintf("无效的请求体: %v", err)
 		log.Printf("切换出站失败 [请求来源: %s, 解码错误]: %s", r.RemoteAddr, errorMsg)
 		jsonError(w, errorMsg, http.StatusBadRequest)
 		return
+	}
+
+	if len(reqBody.OutboundTag) > 256 {
+		jsonError(w, "出站标签过长", http.StatusBadRequest)
+		return
+	}
+	if reqBody.OutboundTag != "" {
+		for _, c := range reqBody.OutboundTag {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+				c == '-' || c == '_' || c == '.' || c == ':') {
+				jsonError(w, "出站标签包含非法字符", http.StatusBadRequest)
+				return
+			}
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
@@ -233,7 +248,7 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, ctx := s.sseManager.Add(r.Context())
+	conn := s.sseManager.Add(r.Context())
 	if conn == nil {
 		errorMsg := "Server is shutting down"
 		log.Printf("SSE 连接失败 [请求来源: %s]: %s", r.RemoteAddr, errorMsg)
@@ -243,6 +258,8 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	defer s.sseManager.Remove(conn)
 	defer conn.Close()
 
+	connCtx := conn.Context()
+
 	statsCh := s.broadcaster.Subscribe()
 	defer s.broadcaster.Unsubscribe(statsCh)
 
@@ -251,23 +268,28 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("SSE 客户端已连接 - 请求来源: %s", r.RemoteAddr)
 
-	if err := s.sendStatsUpdate(ctx, w, flusher); err != nil {
-		log.Printf("发送初始统计数据失败 [请求来源: %s]: %v", r.RemoteAddr, err)
-		return
+	// Push initial stats immediately so the client sees data without waiting for the first tick
+	if stats, err := s.getCombinedStats(connCtx); err == nil {
+		if jsonData, jerr := json.Marshal(stats); jerr == nil {
+			fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData)
+			flusher.Flush()
+		}
 	}
 
 	for {
 		select {
-		case <-ctx.Done():
-			if ctx.Err() == context.Canceled {
+		case <-connCtx.Done():
+			if connCtx.Err() == context.Canceled {
 				log.Printf("SSE 客户端已断开连接(正常) - 请求来源: %s", r.RemoteAddr)
 			} else {
-				log.Printf("SSE 连接结束 (非预期) - 请求来源: %s, 错误: %v", r.RemoteAddr, ctx.Err())
+				log.Printf("SSE 连接结束 (非预期) - 请求来源: %s, 错误: %v", r.RemoteAddr, connCtx.Err())
 			}
 			return
 
 		case <-heartbeat.C:
-			w.Write(heartbeatBytes)
+			if _, err := w.Write(heartbeatBytes); err != nil {
+				return
+			}
 			flusher.Flush()
 
 		case jsonData, ok := <-statsCh:
@@ -275,7 +297,7 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if _, err := fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData); err != nil {
-				if ctx.Err() == nil {
+				if connCtx.Err() == nil {
 					log.Printf("发送统计数据失败 [请求来源: %s]: %v", r.RemoteAddr, err)
 				}
 				return
@@ -322,7 +344,7 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 		stats.Goroutines = int(sysResp.GetNumGoroutine())
 	}
 
-	stats.Outbounds = s.getAllOutboundStatuses(ctx)
+	stats.Outbounds = s.getAllOutboundStatuses(gCtx)
 	return stats, nil
 }
 
@@ -342,10 +364,7 @@ var temporaryErrors = []string{
 }
 
 func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusData {
-	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
-	defer cancel()
-
-	resp, err := s.observatoryClient.GetOutboundStatus(gCtx, &observatorypb.GetOutboundStatusRequest{})
+	resp, err := s.observatoryClient.GetOutboundStatus(ctx, &observatorypb.GetOutboundStatusRequest{})
 	if err != nil {
 		log.Printf("警告: GetOutboundStatus 失败: %v", err)
 		return nil
@@ -366,31 +385,18 @@ func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusDat
 	return result
 }
 
-func (s *Server) sendStatsUpdate(ctx context.Context, w http.ResponseWriter, flusher http.Flusher) error {
-	stats, err := s.getCombinedStats(ctx)
-	if err != nil {
-		return fmt.Errorf("获取统计数据失败: %w", err)
-	}
-
-	jsonData, err := json.Marshal(stats)
-	if err != nil {
-		return fmt.Errorf("序列化 JSON 失败: %w", err)
-	}
-
-	if _, err := fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData); err != nil {
-		return fmt.Errorf("写入 SSE 数据失败: %w", err)
-	}
-
-	flusher.Flush()
-	return nil
-}
-
 func jsonResponse(w http.ResponseWriter, data interface{}, statusCode int) {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("JSON 序列化失败: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal server error"}`))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("JSON 序列化/写入响应失败: %v", err)
-	}
+	w.Write(jsonData)
 }
 
 func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -403,10 +409,12 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 		Timestamp:      time.Now().Unix(),
 	}
 
-	// 验证 Xray API 连接状态
-	if s.handlerClient == nil || s.routingClient == nil || s.observatoryClient == nil || s.statsClient == nil {
+	// Probe Xray API connectivity with a real lightweight RPC call
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
 		health.XrayAPIStatus = "disconnected"
-		health.Status = "unhealthy"
+		health.Status = "degraded"
 	}
 
 	jsonResponse(w, health, http.StatusOK)

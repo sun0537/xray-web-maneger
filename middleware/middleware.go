@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"runtime/debug"
@@ -39,10 +41,12 @@ func Logger(next http.Handler) http.Handler {
 		lrw := writerPool.Get().(*loggingResponseWriter)
 		lrw.ResponseWriter = w
 		lrw.statusCode = http.StatusOK
+		defer func() {
+			log.Printf("%s %s %d %v", r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
+			lrw.ResponseWriter = nil
+			writerPool.Put(lrw)
+		}()
 		next.ServeHTTP(lrw, r)
-		log.Printf("%s %s %d %v", r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
-		lrw.ResponseWriter = nil
-		writerPool.Put(lrw)
 	})
 }
 
@@ -110,7 +114,7 @@ type slidingWindow struct {
 }
 
 type rateLimiter struct {
-	sync.RWMutex
+	sync.Mutex
 	requests     map[string]*slidingWindow
 	limit        int
 	window       time.Duration
@@ -123,41 +127,30 @@ var limiter = rateLimiter{
 	window:   time.Minute,
 }
 
-func init() {
-	go func() {
-		ticker := time.NewTicker(2 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			limiter.Lock()
-			now := time.Now()
-			for ip, sw := range limiter.requests {
-				if now.Sub(sw.startTime) > limiter.window {
-					delete(limiter.requests, ip)
+var limiterOnce sync.Once
+
+func startCleanup() {
+	limiterOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(2 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				limiter.Lock()
+				now := time.Now()
+				for ip, sw := range limiter.requests {
+					if now.Sub(sw.startTime) > limiter.window {
+						delete(limiter.requests, ip)
+					}
 				}
+				limiter.Unlock()
 			}
-			limiter.Unlock()
-		}
-	}()
+		}()
+	})
 }
 
-func (rl *rateLimiter) isRateLimited(ip string) bool {
-	rl.RLock()
-	defer rl.RUnlock()
-
-	sw, exists := rl.requests[ip]
-	if !exists {
-		return false
-	}
-
-	now := time.Now()
-	if now.Sub(sw.startTime) > rl.window {
-		return false
-	}
-
-	return sw.count >= rl.limit
-}
-
-func (rl *rateLimiter) recordRequest(ip string) {
+// checkAndRecord atomically checks the rate limit and records the request.
+// Returns true if the request should be allowed.
+func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	rl.Lock()
 	defer rl.Unlock()
 
@@ -166,15 +159,21 @@ func (rl *rateLimiter) recordRequest(ip string) {
 	sw, exists := rl.requests[ip]
 	if !exists || now.Sub(sw.startTime) > rl.window {
 		rl.requests[ip] = &slidingWindow{count: 1, startTime: now}
-	} else {
-		sw.count++
+		return true
 	}
+
+	if sw.count >= rl.limit {
+		return false
+	}
+
+	sw.count++
 
 	rl.cleanupCount++
 	if rl.cleanupCount >= 100 {
 		rl.cleanupStaleKeys(now)
 		rl.cleanupCount = 0
 	}
+	return true
 }
 
 func (rl *rateLimiter) cleanupStaleKeys(now time.Time) {
@@ -185,15 +184,34 @@ func (rl *rateLimiter) cleanupStaleKeys(now time.Time) {
 	}
 }
 
+// getClientIP extracts the client IP from RemoteAddr.
+func getClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 // 速率限制中间件
 func RateLimit(next http.Handler) http.Handler {
+	startCleanup()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
-		if limiter.isRateLimited(ip) {
+		ip := getClientIP(r)
+		if !limiter.checkAndRecord(ip) {
 			http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
 			return
 		}
-		limiter.recordRequest(ip)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -206,7 +224,9 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user, pass, ok := r.BasicAuth()
-			if !ok || user != username || pass != password {
+			if !ok ||
+				subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 ||
+				subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Xray Manager"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return

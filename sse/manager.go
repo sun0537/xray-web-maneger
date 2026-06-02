@@ -38,12 +38,12 @@ func NewManager() *Manager {
 	}
 }
 
-func (m *Manager) Add(ctx context.Context) (Connection, context.Context) {
+func (m *Manager) Add(ctx context.Context) Connection {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.shutdown {
-		return nil, ctx
+		return nil
 	}
 
 	newCtx, cancel := context.WithCancel(ctx)
@@ -54,7 +54,7 @@ func (m *Manager) Add(ctx context.Context) (Connection, context.Context) {
 	m.connections[localConn] = true
 
 	log.Printf("SSE 连接已添加，当前连接数: %d", len(m.connections))
-	return localConn, newCtx
+	return localConn
 }
 
 func (m *Manager) Remove(conn Connection) {

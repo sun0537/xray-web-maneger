@@ -15,12 +15,11 @@ func TestManager_AddRemoveCount(t *testing.T) {
 	assert.Equal(t, 0, mgr.Count(), "初始 Count 应为 0")
 
 	// 添加连接
-	conn1, ctx1 := mgr.Add(context.Background())
+	conn1 := mgr.Add(context.Background())
 	assert.NotNil(t, conn1)
-	assert.NotNil(t, ctx1)
 	assert.Equal(t, 1, mgr.Count())
 
-	conn2, _ := mgr.Add(context.Background())
+	conn2 := mgr.Add(context.Background())
 	assert.Equal(t, 2, mgr.Count())
 
 	// 移除连接
@@ -36,7 +35,8 @@ func TestManager_CloseAll(t *testing.T) {
 	mgr := NewManager()
 
 	// 添加一个连接并监听它的 Context
-	_, ctx1 := mgr.Add(context.Background())
+	conn1 := mgr.Add(context.Background())
+	ctx1 := conn1.Context()
 	conn1Closed := make(chan bool)
 	go func() {
 		<-ctx1.Done() // 等待上下文被取消
@@ -54,7 +54,7 @@ func TestManager_CloseAll(t *testing.T) {
 	assert.Equal(t, 0, mgr.Count())
 
 	// 2. 验证新连接是否被拒绝
-	conn3, _ := mgr.Add(context.Background())
+	conn3 := mgr.Add(context.Background())
 	assert.Nil(t, conn3, "关闭后 Add 应返回 nil")
 	assert.Equal(t, 0, mgr.Count())
 
@@ -82,7 +82,7 @@ func TestManager_Race(t *testing.T) {
 			defer wg.Done()
 
 			// 模拟并发添加
-			conn, _ := mgr.Add(context.Background())
+			conn := mgr.Add(context.Background())
 			if conn == nil { // 可能在 CloseAll 之后
 				return
 			}
