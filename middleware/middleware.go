@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"crypto/subtle"
 	"log"
 	"net"
@@ -35,19 +36,35 @@ var writerPool = sync.Pool{
 	},
 }
 
+type ctxKey struct{}
+
+var clientIPKey ctxKey
+
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := ClientIP(r)
+		r = r.WithContext(context.WithValue(r.Context(), clientIPKey, ip))
+
 		start := time.Now()
 		lrw := writerPool.Get().(*loggingResponseWriter)
 		lrw.ResponseWriter = w
 		lrw.statusCode = http.StatusOK
 		defer func() {
-			log.Printf("%s %s %d %v", r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
+			log.Printf("%s %s %s %d %v", ip, r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
 			lrw.ResponseWriter = nil
 			writerPool.Put(lrw)
 		}()
 		next.ServeHTTP(lrw, r)
 	})
+}
+
+// GetClientIP returns the client IP cached by the Logger middleware.
+// Falls back to ClientIP(r) if Logger is not in the chain.
+func GetClientIP(r *http.Request) string {
+	if ip, ok := r.Context().Value(clientIPKey).(string); ok {
+		return ip
+	}
+	return ClientIP(r)
 }
 
 func Recovery(next http.Handler) http.Handler {
@@ -68,9 +85,9 @@ func CheckOrigin(allowedOrigins []string) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler { return next }
 	}
 
-	allowedMap := make(map[string]bool, len(allowedOrigins))
+	allowedMap := make(map[string]struct{}, len(allowedOrigins))
 	for _, origin := range allowedOrigins {
-		allowedMap[origin] = true
+		allowedMap[origin] = struct{}{}
 	}
 	log.Printf("安全: 已启用 Origin 检查, 允许的来源: %v", allowedOrigins)
 
@@ -88,13 +105,23 @@ func CheckOrigin(allowedOrigins []string) func(http.Handler) http.Handler {
 			}
 
 			if origin == "" {
+				switch r.Method {
+				case http.MethodGet, http.MethodHead, http.MethodOptions:
+					// Safe methods: allow without Origin (same-origin navigation, etc.)
+				default:
+					log.Printf("警告: 拒绝了缺少 Origin 头的状态变更请求: %s %s", r.Method, r.URL.Path)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					w.Write([]byte(`{"error":"缺少 Origin 头 (Missing Origin header)"}`))
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			origin = strings.TrimRight(origin, "/")
 
-			if !allowedMap[origin] {
+			if _, ok := allowedMap[origin]; !ok {
 				log.Printf("警告: 拒绝了来自非法 Origin 的请求: %s", origin)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
@@ -109,64 +136,91 @@ func CheckOrigin(allowedOrigins []string) func(http.Handler) http.Handler {
 
 // 速率限制相关数据结构
 type slidingWindow struct {
-	count     int
-	startTime time.Time
+	prevCount   int
+	currCount   int
+	windowStart time.Time
 }
 
 type rateLimiter struct {
 	sync.Mutex
-	requests     map[string]*slidingWindow
+	requests     map[string]slidingWindow
 	limit        int
 	window       time.Duration
 	cleanupCount int
 }
 
 var limiter = rateLimiter{
-	requests: make(map[string]*slidingWindow),
+	requests: make(map[string]slidingWindow),
 	limit:    100,
 	window:   time.Minute,
 }
 
 var limiterOnce sync.Once
 
-func startCleanup() {
+func startCleanup(ctx context.Context) {
 	limiterOnce.Do(func() {
 		go func() {
 			ticker := time.NewTicker(2 * time.Minute)
 			defer ticker.Stop()
-			for range ticker.C {
-				limiter.Lock()
-				now := time.Now()
-				for ip, sw := range limiter.requests {
-					if now.Sub(sw.startTime) > limiter.window {
-						delete(limiter.requests, ip)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					limiter.Lock()
+					now := time.Now()
+					for ip, sw := range limiter.requests {
+						if now.Sub(sw.windowStart) > limiter.window*2 {
+							delete(limiter.requests, ip)
+						}
 					}
+					limiter.Unlock()
 				}
-				limiter.Unlock()
 			}
 		}()
 	})
 }
 
 // checkAndRecord atomically checks the rate limit and records the request.
+// Uses a sliding window algorithm: the effective count blends the previous
+// window's count (weighted by overlap) with the current window's count.
 // Returns true if the request should be allowed.
 func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	rl.Lock()
 	defer rl.Unlock()
 
 	now := time.Now()
-
 	sw, exists := rl.requests[ip]
-	if !exists || now.Sub(sw.startTime) > rl.window {
-		rl.requests[ip] = &slidingWindow{count: 1, startTime: now}
+
+	if !exists {
+		rl.requests[ip] = slidingWindow{currCount: 1, windowStart: now}
 		return true
 	}
 
-	if sw.count >= rl.limit {
+	elapsed := now.Sub(sw.windowStart)
+
+	if elapsed > rl.window*2 {
+		rl.requests[ip] = slidingWindow{currCount: 1, windowStart: now}
+		return true
+	}
+
+	if elapsed > rl.window {
+		sw.prevCount = sw.currCount
+		sw.currCount = 0
+		sw.windowStart = sw.windowStart.Add(rl.window * (elapsed / rl.window))
+		elapsed = now.Sub(sw.windowStart)
+	}
+
+	overlap := 1.0 - float64(elapsed)/float64(rl.window)
+	effective := float64(sw.prevCount)*overlap + float64(sw.currCount)
+
+	if effective >= float64(rl.limit) {
+		rl.requests[ip] = sw
 		return false
 	}
 
-	sw.count++
+	sw.currCount++
+	rl.requests[ip] = sw
 
 	rl.cleanupCount++
 	if rl.cleanupCount >= 100 {
@@ -178,14 +232,23 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 
 func (rl *rateLimiter) cleanupStaleKeys(now time.Time) {
 	for ip, sw := range rl.requests {
-		if now.Sub(sw.startTime) > rl.window*2 {
+		if now.Sub(sw.windowStart) > rl.window {
 			delete(rl.requests, ip)
 		}
 	}
 }
 
-// getClientIP extracts the client IP from RemoteAddr.
-func getClientIP(r *http.Request) string {
+// ClientIP extracts the client IP from request headers or RemoteAddr.
+func ClientIP(r *http.Request) string {
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if idx := strings.Index(xff, ","); idx > 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -194,10 +257,10 @@ func getClientIP(r *http.Request) string {
 }
 
 // 速率限制中间件
-func RateLimit(next http.Handler) http.Handler {
-	startCleanup()
+func RateLimit(ctx context.Context, next http.Handler) http.Handler {
+	startCleanup(ctx)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := getClientIP(r)
+		ip := ClientIP(r)
 		if !limiter.checkAndRecord(ip) {
 			http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
 			return

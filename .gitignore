@@ -11,6 +11,7 @@
 
 # === 3. 前端依赖 ===
 /frontend/node_modules/
+/frontend/style.css
 
 
 # === 4. 操作系统/IDE 临时文件 ===

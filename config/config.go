@@ -134,8 +134,9 @@ func ValidateConfig(config Config) error {
 	}
 
 	for _, origin := range config.Server.AllowedOrigins {
-		if _, err := url.Parse(origin); err != nil {
-			return fmt.Errorf("无效的 Origin: %s", origin)
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("无效的 Origin (需要 http(s)://host): %s", origin)
 		}
 	}
 

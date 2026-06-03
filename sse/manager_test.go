@@ -39,11 +39,10 @@ func TestManager_CloseAll(t *testing.T) {
 	ctx1 := conn1.Context()
 	conn1Closed := make(chan bool)
 	go func() {
-		<-ctx1.Done() // 等待上下文被取消
+		<-ctx1.Done()
 		conn1Closed <- true
 	}()
 
-	// 添加第二个连接
 	mgr.Add(context.Background())
 	assert.Equal(t, 2, mgr.Count())
 

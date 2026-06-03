@@ -24,7 +24,7 @@ import (
 	"xray-web-manager/sse"
 )
 
-//go:embed frontend
+//go:embed frontend/index.html frontend/app.js frontend/style.css
 var frontendFS embed.FS
 
 var devMode = flag.Bool("dev", false, "开发模式：使用外部文件而不是嵌入文件")
@@ -79,10 +79,17 @@ func main() {
 		time.Sleep(2 * time.Second)
 	}
 
+	if conn.GetState() == connectivity.Idle || conn.GetState() == connectivity.TransientFailure {
+		log.Fatalf("无法连接到 Xray gRPC API (%s)，请检查配置", cfg.Xray.ApiAddr)
+	}
+
 	log.Println("已创建 gRPC 客户端连接")
 
 	sseMgr := sse.NewManager()
 	srv := server.NewServer(cfg, conn, sseMgr, time.Now())
+
+	rateLimitCtx, rateLimitCancel := context.WithCancel(context.Background())
+	defer rateLimitCancel()
 
 	mainMux := http.NewServeMux()
 	apiMux := http.NewServeMux()
@@ -95,7 +102,7 @@ func main() {
 
 	var finalHandler http.Handler = mainMux
 	finalHandler = middleware.SecurityHeaders(finalHandler)
-	finalHandler = middleware.RateLimit(finalHandler)
+	finalHandler = middleware.RateLimit(rateLimitCtx, finalHandler)
 	finalHandler = middleware.BasicAuth(cfg.Auth.Username, cfg.Auth.Password)(finalHandler)
 	finalHandler = middleware.Logger(finalHandler)
 	finalHandler = middleware.Recovery(finalHandler)

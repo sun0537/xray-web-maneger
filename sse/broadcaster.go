@@ -1,7 +1,8 @@
 package sse
 
 import (
-	"hash/fnv"
+	"bytes"
+	"log"
 	"sync"
 	"time"
 )
@@ -16,7 +17,6 @@ type Broadcaster struct {
 	interval    time.Duration
 	stopCh      chan struct{}
 	stopped     bool
-	lastData    []byte
 }
 
 // NewBroadcaster creates a Broadcaster. fetchFn is called every interval;
@@ -29,10 +29,6 @@ func NewBroadcaster(fetchFn func() ([]byte, error), interval time.Duration) *Bro
 		interval:    interval,
 	}
 }
-
-// Start is a no-op kept for backward compatibility.
-// The loop now starts lazily on first Subscribe().
-func (b *Broadcaster) Start() {}
 
 // Stop shuts down the background loop (if running) and closes all subscriber channels.
 func (b *Broadcaster) Stop() {
@@ -67,12 +63,7 @@ func (b *Broadcaster) Subscribe() chan []byte {
 	b.subscribers[ch] = struct{}{}
 	if wasEmpty {
 		b.stopCh = make(chan struct{})
-		if b.lastData != nil {
-			ch <- b.lastData
-		}
 		go b.loop(b.stopCh)
-	} else if b.lastData != nil {
-		ch <- b.lastData
 	}
 	return ch
 }
@@ -94,8 +85,7 @@ func (b *Broadcaster) loop(stopCh chan struct{}) {
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
 
-	var lastHash uint64
-	hasher := fnv.New64a()
+	var lastData []byte
 
 	for {
 		select {
@@ -104,20 +94,16 @@ func (b *Broadcaster) loop(stopCh chan struct{}) {
 		case <-ticker.C:
 			data, err := b.fetchFn()
 			if err != nil {
+				log.Printf("警告: 统计数据获取失败: %v", err)
 				continue
 			}
 
-			// Skip broadcast if data unchanged since last tick
-			hasher.Reset()
-			hasher.Write(data)
-			h := hasher.Sum64()
-			if h == lastHash {
+			if bytes.Equal(lastData, data) {
 				continue
 			}
-			lastHash = h
+			lastData = data
 
 			b.mu.Lock()
-			b.lastData = data
 			for ch := range b.subscribers {
 				select {
 				case ch <- data:

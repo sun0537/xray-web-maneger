@@ -90,18 +90,29 @@ func TestCheckOrigin(t *testing.T) {
 		assert.Equal(t, "OK", rr.Body.String())
 	})
 
-	// --- 用例 4: 无 Origin / Referer (同源请求应放行) ---
-	t.Run("No Origin same-origin pass", func(t *testing.T) {
+	// --- 用例 4: 无 Origin 的 GET 请求 (安全方法应放行) ---
+	t.Run("No Origin GET pass", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code, "无 Origin 的 GET 请求应放行")
+		assert.Equal(t, "OK", rr.Body.String())
+	})
+
+	// --- 用例 5: 无 Origin 的 POST 请求 (状态变更方法应拒绝) ---
+	t.Run("No Origin POST blocked", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/switch", nil)
 		rr := httptest.NewRecorder()
 
 		testHandler.ServeHTTP(rr, req)
 
-		assert.Equal(t, http.StatusOK, rr.Code, "无 Origin 的同源请求应放行")
-		assert.Equal(t, "OK", rr.Body.String())
+		assert.Equal(t, http.StatusForbidden, rr.Code, "无 Origin 的 POST 请求应被拒绝")
+		assert.Contains(t, rr.Body.String(), "缺少 Origin 头", "响应体应包含错误信息")
 	})
 
-	// --- 用例 5: 配置为空时 (应跳过检查) ---
+	// --- 用例 6: 配置为空时 (应跳过检查) ---
 	t.Run("Empty config skips check", func(t *testing.T) {
 		emptyMiddleware := CheckOrigin([]string{})
 		emptyHandler := emptyMiddleware(okHandler)

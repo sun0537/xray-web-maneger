@@ -11,10 +11,13 @@ type Connection interface {
 	Close()
 }
 
+const defaultMaxConns = 256
+
 type Manager struct {
 	mu          sync.RWMutex
-	connections map[Connection]bool
+	connections map[Connection]struct{}
 	shutdown    bool
+	maxConns    int
 }
 
 type sseConnection struct {
@@ -34,7 +37,8 @@ func (c *sseConnection) Close() {
 
 func NewManager() *Manager {
 	return &Manager{
-		connections: make(map[Connection]bool),
+		connections: make(map[Connection]struct{}),
+		maxConns:    defaultMaxConns,
 	}
 }
 
@@ -46,14 +50,18 @@ func (m *Manager) Add(ctx context.Context) Connection {
 		return nil
 	}
 
+	if len(m.connections) >= m.maxConns {
+		log.Printf("SSE 连接数已达上限 (%d)，拒绝新连接", m.maxConns)
+		return nil
+	}
+
 	newCtx, cancel := context.WithCancel(ctx)
 	localConn := &sseConnection{
 		ctx:    newCtx,
 		cancel: cancel,
 	}
-	m.connections[localConn] = true
+	m.connections[localConn] = struct{}{}
 
-	log.Printf("SSE 连接已添加，当前连接数: %d", len(m.connections))
 	return localConn
 }
 
@@ -63,7 +71,6 @@ func (m *Manager) Remove(conn Connection) {
 
 	if conn != nil {
 		delete(m.connections, conn)
-		log.Printf("SSE 连接已移除，当前连接数: %d", len(m.connections))
 	}
 }
 
@@ -78,7 +85,7 @@ func (m *Manager) CloseAll() {
 		conn.Close()
 	}
 
-	m.connections = make(map[Connection]bool)
+	m.connections = make(map[Connection]struct{})
 	log.Println("所有 SSE 连接已关闭")
 }
 

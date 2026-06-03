@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"xray-web-manager/config"
@@ -32,6 +33,11 @@ type Server struct {
 	startTime         time.Time
 	shutdownCtx       context.Context
 	shutdownCancel    context.CancelFunc
+	healthMu         sync.Mutex
+	lastHealthCheck  time.Time
+	cachedXrayStatus string
+	healthRefreshing bool
+	healthWg         sync.WaitGroup
 }
 
 // NewServer 是一个构造函数，用于创建 Server 实例
@@ -50,13 +56,12 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 	}
 
 	s.broadcaster = sse.NewBroadcaster(func() ([]byte, error) {
-		stats, err := s.getCombinedStats(s.shutdownCtx)
+		stats, _, err := s.getCombinedStats(s.shutdownCtx)
 		if err != nil {
 			return nil, err
 		}
 		return json.Marshal(stats)
 	}, sseUpdateInterval)
-	s.broadcaster.Start()
 
 	return s
 }
@@ -66,7 +71,6 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", s.handleHealthCheck)
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("GET /api/outbounds", s.handleGetOutbounds)
-	mux.HandleFunc("GET /api/outbound-status", s.handleGetOutboundStatus)
 	mux.HandleFunc("GET /api/outbounds-status", s.handleGetOutboundsStatus)
 	mux.HandleFunc("GET /api/current-outbound", s.handleGetCurrentOutbound)
 	mux.HandleFunc("GET /api/stats-sse", s.handleStatsSSE)
