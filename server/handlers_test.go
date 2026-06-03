@@ -234,7 +234,6 @@ func TestHandleStatsSSE(t *testing.T) {
 		return json.Marshal(stats)
 	}
 	broadcaster := sse.NewBroadcaster(fetchFn, 100*time.Millisecond)
-	broadcaster.Start()
 	defer broadcaster.Stop()
 
 	s := &Server{
@@ -335,9 +334,9 @@ func TestHandleSwitchOutbound(t *testing.T) {
 		s.handleSwitchOutbound(rr, req)
 
 		assert.Equal(t, http.StatusOK, rr.Code)
-		var resp map[string]string
+		var resp successResponse
 		json.Unmarshal(rr.Body.Bytes(), &resp)
-		assert.Equal(t, "success", resp["status"])
+		assert.Equal(t, "success", resp.Status)
 	})
 
 	t.Run("Empty body", func(t *testing.T) {
