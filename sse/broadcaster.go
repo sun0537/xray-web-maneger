@@ -10,6 +10,10 @@ import (
 // Broadcaster periodically fetches data and fans it out to all subscribers.
 // The background polling loop starts lazily on the first Subscribe() call
 // and stops automatically when the last subscriber unsubscribes.
+//
+// NOTE: fetchFn is called WITHOUT holding b.mu, so long-running fetches
+// (e.g. gRPC calls with multi-second timeouts) will NOT block Subscribe()
+// or Unsubscribe(). The mutex is only held during the fan-out phase.
 type Broadcaster struct {
 	mu          sync.Mutex
 	subscribers map[chan []byte]struct{}
@@ -17,7 +21,6 @@ type Broadcaster struct {
 	interval    time.Duration
 	stopCh      chan struct{}
 	stopped     bool
-	lastData    []byte
 }
 
 // NewBroadcaster creates a Broadcaster. fetchFn is called every interval;
@@ -82,9 +85,16 @@ func (b *Broadcaster) Unsubscribe(ch chan []byte) {
 	}
 }
 
+// maxConsecutiveErrors is the number of consecutive fetch failures before
+// a degraded event is pushed to subscribers so they know data is stale.
+const maxConsecutiveErrors = 3
+
 func (b *Broadcaster) loop(stopCh chan struct{}) {
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
+
+	var lastData []byte
+	consecutiveErrors := 0
 
 	for {
 		select {
@@ -93,14 +103,28 @@ func (b *Broadcaster) loop(stopCh chan struct{}) {
 		case <-ticker.C:
 			data, err := b.fetchFn()
 			if err != nil {
-				log.Printf("警告: 统计数据获取失败: %v", err)
+				consecutiveErrors++
+				log.Printf("警告: 统计数据获取失败 (连续第%d次): %v", consecutiveErrors, err)
+				if consecutiveErrors == maxConsecutiveErrors {
+					degradedEvent := []byte(`{"degraded":true,"error":"数据源不可用"}`)
+					b.mu.Lock()
+					for ch := range b.subscribers {
+						select {
+						case ch <- degradedEvent:
+						default:
+						}
+					}
+					b.mu.Unlock()
+				}
 				continue
 			}
 
-			if bytes.Equal(b.lastData, data) {
+			consecutiveErrors = 0
+
+			if bytes.Equal(lastData, data) {
 				continue
 			}
-			b.lastData = data
+			lastData = data
 
 			b.mu.Lock()
 			for ch := range b.subscribers {
