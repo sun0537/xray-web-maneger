@@ -9,6 +9,31 @@ const XrayManager = {
 
 const $ = (id) => document.getElementById(id);
 
+// Pre-computed CSS class strings to avoid repeated concatenation in hot paths.
+const STATUS_CLASSES = {
+    checking: {
+        container: 'flex items-center gap-2 text-xs text-yellow-400',
+        dotAnim:   'animate-pulse absolute inline-flex h-2 w-2 rounded-full bg-yellow-500 opacity-75',
+        dot:       'relative inline-flex rounded-full h-2 w-2 bg-yellow-500',
+        label:     'font-mono font-semibold text-yellow-400',
+    },
+    alive: {
+        container: 'flex items-center gap-2 text-xs text-green-400',
+        dotAnim:   'animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-500 opacity-75',
+        dot:       'relative inline-flex rounded-full h-2 w-2 bg-green-500',
+        label:     'font-mono font-semibold',
+    },
+    dead: {
+        container: 'flex items-center gap-2 text-xs text-red-400',
+        dotAnim:   'animate-ping absolute inline-flex h-2 w-2 rounded-full bg-red-500 opacity-75',
+        dot:       'relative inline-flex rounded-full h-2 w-2 bg-red-500',
+        label:     'font-mono font-semibold',
+    },
+    error: {
+        container: 'flex items-center gap-2 text-xs text-white/70',
+    },
+};
+
 const UIManager = (function() {
     const els = {
         uplink: $('stats-uplink'),
@@ -33,6 +58,14 @@ const UIManager = (function() {
             els.uptime.textContent = formatDuration(data.uptime);
             els.sysMem.textContent = formatBytes(data.sys_mem);
             els.goroutines.textContent = data.goroutines;
+            // Show subtle indicator when stats are partially degraded
+            if (data.degraded) {
+                els.uplink.title = '数据可能不完整 (部分数据源不可用)';
+                els.downlink.title = '数据可能不完整 (部分数据源不可用)';
+            } else {
+                els.uplink.title = '';
+                els.downlink.title = '';
+            }
         },
 
         updateAllCardStatuses: function(outbounds) {
@@ -44,28 +77,28 @@ const UIManager = (function() {
         },
 
         updateCardStatus: function(tag, status) {
-            var statusEl = document.getElementById('status-' + tag);
+            const statusEl = document.getElementById('status-' + tag);
             if (!statusEl) return;
             this.performUIUpdate(statusEl, status);
         },
 
         performUIUpdate: function(statusEl, status) {
             if (status && status.error !== 'not_found' && status.error !== 'fetch_failed') {
-                var alive = status.alive;
-                var delay = status.delay;
-                var stateKey = alive + '|' + delay;
+                const alive = status.alive;
+                const delay = status.delay;
+                const stateKey = alive + '|' + delay;
                 if (statusEl._lastState === stateKey) return;
                 statusEl._lastState = stateKey;
 
                 if (!statusEl._dot) {
                     statusEl.textContent = '';
-                    var dotWrap = document.createElement('span');
+                    const dotWrap = document.createElement('span');
                     dotWrap.className = 'flex h-2 w-2 relative';
-                    var dotAnim = document.createElement('span');
-                    var dotDot = document.createElement('span');
+                    const dotAnim = document.createElement('span');
+                    const dotDot = document.createElement('span');
                     dotWrap.appendChild(dotAnim);
                     dotWrap.appendChild(dotDot);
-                    var label = document.createElement('span');
+                    const label = document.createElement('span');
                     label.className = 'font-mono font-semibold';
                     statusEl.appendChild(dotWrap);
                     statusEl.appendChild(label);
@@ -75,27 +108,24 @@ const UIManager = (function() {
                     statusEl._label = label;
                 }
 
+                let theme;
                 if (alive && (delay === undefined || delay === null || delay === 0)) {
-                    statusEl.className = 'flex items-center gap-2 text-xs text-yellow-400';
-                    statusEl._dotAnim.className = 'animate-pulse absolute inline-flex h-2 w-2 rounded-full bg-yellow-500 opacity-75';
-                    statusEl._dot.className = 'relative inline-flex rounded-full h-2 w-2 bg-yellow-500';
-                    statusEl._label.className = 'font-mono font-semibold text-yellow-400';
+                    theme = STATUS_CLASSES.checking;
                     statusEl._label.textContent = '\u68C0\u6D4B\u4E2D...';
                 } else {
-                    var color = alive ? 'bg-green-500' : 'bg-red-500';
-                    var statusColor = alive ? 'text-green-400' : 'text-red-400';
-                    statusEl.className = 'flex items-center gap-2 text-xs ' + statusColor;
-                    statusEl._dotAnim.className = 'animate-ping absolute inline-flex h-2 w-2 rounded-full ' + color + ' opacity-75';
-                    statusEl._dot.className = 'relative inline-flex rounded-full h-2 w-2 ' + color;
-                    statusEl._label.className = 'font-mono font-semibold';
+                    theme = alive ? STATUS_CLASSES.alive : STATUS_CLASSES.dead;
                     statusEl._label.textContent = (delay || 0) + ' ms';
                 }
+                statusEl.className = theme.container;
+                statusEl._dotAnim.className = theme.dotAnim;
+                statusEl._dot.className = theme.dot;
+                statusEl._label.className = theme.label;
             } else {
                 if (statusEl._lastState === 'error') return;
                 statusEl._lastState = 'error';
                 statusEl.textContent = '';
-                statusEl.className = 'flex items-center gap-2 text-xs text-white/70';
-                var failLabel = document.createElement('span');
+                statusEl.className = STATUS_CLASSES.error.container;
+                const failLabel = document.createElement('span');
                 failLabel.textContent = '\u25CB \u68C0\u6D4B\u5931\u8D25';
                 statusEl.appendChild(failLabel);
                 statusEl._dot = null;
@@ -103,8 +133,8 @@ const UIManager = (function() {
         },
 
         updateCurrentDisplay: function(auto, current) {
-            var el = els.currentTag;
-            var stateKey = auto + '|' + current;
+            const el = els.currentTag;
+            const stateKey = auto + '|' + current;
             if (el._lastState === stateKey) return;
             el._lastState = stateKey;
             if (!el._span) {
@@ -112,7 +142,7 @@ const UIManager = (function() {
                 el._span = document.createElement('span');
                 el.appendChild(el._span);
             }
-            var span = el._span;
+            const span = el._span;
             if (auto || !current) {
                 span.className = 'text-orange-300';
                 span.textContent = '\uD83D\uDD04 \u81EA\u52A8\u5747\u8861\u6A21\u5F0F';
@@ -123,7 +153,7 @@ const UIManager = (function() {
         },
 
         updateErrorDisplay: function() {
-            var el = els.currentTag;
+            const el = els.currentTag;
             if (el._lastState === 'error') return;
             el._lastState = 'error';
             if (!el._span) {
@@ -162,24 +192,24 @@ const NotificationManager = (function() {
 
 function showModal(message) {
     return new Promise(function(resolve) {
-        var overlay = document.createElement('div');
+        const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50';
 
-        var modal = document.createElement('div');
+        const modal = document.createElement('div');
         modal.className = 'bg-gray-800 border border-white/20 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl';
 
-        var msgEl = document.createElement('p');
+        const msgEl = document.createElement('p');
         msgEl.className = 'text-white text-sm mb-6 whitespace-pre-line';
         msgEl.textContent = message;
 
-        var btnWrap = document.createElement('div');
+        const btnWrap = document.createElement('div');
         btnWrap.className = 'flex gap-3 justify-end';
 
-        var cancelBtn = document.createElement('button');
+        const cancelBtn = document.createElement('button');
         cancelBtn.className = 'px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition duration-200';
         cancelBtn.textContent = '\u53D6\u6D88';
 
-        var confirmBtn = document.createElement('button');
+        const confirmBtn = document.createElement('button');
         confirmBtn.className = 'px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-white text-sm font-semibold transition duration-200';
         confirmBtn.textContent = '\u786E\u8BA4';
 
@@ -212,12 +242,12 @@ window.addEventListener('load', function() {
     NetworkManager.loadConfig();
     connectStatsSSE();
 
-    var uiElements = UIManager.getElements();
+    const uiElements = UIManager.getElements();
     uiElements.resetBtn.addEventListener('click', function() {
         NetworkManager.applyOutboundChange('', '\u81EA\u52A8\u5747\u8861', { reload: true });
     });
 
-    var refreshing = false;
+    let refreshing = false;
     uiElements.refreshBtn.addEventListener('click', async function() {
         if (refreshing) return;
         refreshing = true;
@@ -237,20 +267,72 @@ window.addEventListener('beforeunload', function() {
 });
 
 async function safeJson(response) {
-    var contentType = response.headers.get('content-type') || '';
+    const contentType = response.headers.get('content-type') || '';
     if (contentType.indexOf('application/json') !== -1) {
         return await response.json();
     }
     throw new Error('Server returned non-JSON response (' + response.status + ')');
 }
 
+/**
+ * Retry UI helper: displays an error message with a countdown retry button.
+ * @param {HTMLElement} container - The container to render the retry UI into
+ * @param {string} message - Error message to display
+ * @param {Function} retryFn - Async function to call on retry
+ * @param {number} [countdown=5] - Seconds before auto-retry
+ */
+function showRetryUI(container, message, retryFn, countdown) {
+    if (countdown === undefined) countdown = 5;
+    let remaining = countdown;
+    let timer = null;
+
+    container.innerHTML = '';
+    const wrapper = document.createElement('div');
+    wrapper.className = 'text-center py-4 col-span-full';
+
+    const msgEl = document.createElement('p');
+    msgEl.className = 'text-red-400 mb-3';
+
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'bg-cyan-500 hover:bg-cyan-600 text-white text-sm px-4 py-2 rounded-lg transition duration-200';
+
+    wrapper.appendChild(msgEl);
+    wrapper.appendChild(retryBtn);
+    container.appendChild(wrapper);
+
+    function updateDisplay() {
+        msgEl.textContent = '\u274C ' + message;
+        retryBtn.textContent = '\u21BB \u91CD\u8BD5 (' + remaining + 's)';
+    }
+
+    function doRetry() {
+        if (timer) clearInterval(timer);
+        container.innerHTML = '<div class="text-white/70 text-center py-4 col-span-full">\u6B63\u5728\u91CD\u8BD5...</div>';
+        retryFn();
+    }
+
+    updateDisplay();
+    timer = setInterval(function() {
+        remaining--;
+        if (remaining <= 0) {
+            doRetry();
+        } else {
+            updateDisplay();
+        }
+    }, 1000);
+
+    retryBtn.addEventListener('click', function() {
+        doRetry();
+    });
+}
+
 const NetworkManager = (function() {
     return {
         loadConfig: async function() {
             try {
-                var response = await fetch('/api/config');
+                const response = await fetch('/api/config');
                 if (response.ok) {
-                    var config = await safeJson(response);
+                    const config = await safeJson(response);
                     XrayManager.balancerTag = config.balancer_tag;
                     UIManager.getElements().balancerTag.textContent = XrayManager.balancerTag;
                 }
@@ -262,24 +344,25 @@ const NetworkManager = (function() {
 
         fetchOutboundList: async function() {
             try {
-                var response = await fetch('/api/outbounds');
+                const response = await fetch('/api/outbounds');
                 if (!response.ok) throw new Error('Failed to fetch outbounds');
-                var outbounds = await safeJson(response);
+                const outbounds = await safeJson(response);
                 if (outbounds.length === 0) return [];
                 return outbounds;
             } catch (error) {
                 console.error('Error loading outbounds:', error);
-                UIManager.getElements().outboundsList.innerHTML =
-                    '<p class="text-red-400 text-center py-4 col-span-full">\u274C \u52A0\u8F7D\u51FA\u7AD9\u5217\u8868\u5931\u8D25</p>';
-                return [];
+                const container = UIManager.getElements().outboundsList;
+                showRetryUI(container, '\u52A0\u8F7D\u51FA\u7AD9\u5217\u8868\u5931\u8D25: ' + error.message,
+                    function() { NetworkManager.initializePage(); });
+                return null;
             }
         },
 
         loadCurrentOutbound: async function() {
             try {
-                var response = await fetch('/api/current-outbound');
+                const response = await fetch('/api/current-outbound');
                 if (!response.ok) throw new Error('Failed to fetch current outbound');
-                var data = await safeJson(response);
+                const data = await safeJson(response);
                 XrayManager.prevCurrentOutbound = XrayManager.currentOutbound;
                 if (data.auto || !data.current) {
                     XrayManager.currentOutbound = '';
@@ -296,15 +379,15 @@ const NetworkManager = (function() {
         },
 
         applyOutboundChange: async function(outboundTag, displayName, options) {
-            var opts = options || { reload: true };
+            const opts = options || { reload: true };
             try {
-                var response = await fetch('/api/switch-outbound', {
+                const response = await fetch('/api/switch-outbound', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ outbound_tag: outboundTag })
                 });
                 if (!response.ok) {
-                    var errData;
+                    let errData;
                     try { errData = await response.json(); } catch(e) { errData = null; }
                     throw new Error((errData && errData.error) || 'Failed to apply change');
                 }
@@ -321,30 +404,35 @@ const NetworkManager = (function() {
         initializePage: async function() {
             XrayManager.pageReady = false;
 
-            var results = await Promise.all([
+            const results = await Promise.all([
                 this.loadCurrentOutbound(),
                 this.fetchOutboundList()
             ]);
-            var currentStatus = results[0];
-            var newNodeData = results[1];
+            const currentStatus = results[0];
+            const newNodeData = results[1];
 
-            var orderedNodeData;
+            // fetchOutboundList returns null on error (retry UI already shown)
+            if (newNodeData === null) {
+                return;
+            }
+
+            let orderedNodeData;
             if (XrayManager.fixedNodeOrder.length === 0) {
                 newNodeData.sort(function(a, b) { return a.tag.localeCompare(b.tag); });
                 XrayManager.fixedNodeOrder = newNodeData.map(function(n) { return n.tag; });
                 orderedNodeData = newNodeData;
             } else {
-                var nodeMap = new Map(newNodeData.map(function(n) { return [n.tag, n]; }));
+                const nodeMap = new Map(newNodeData.map(function(n) { return [n.tag, n]; }));
                 orderedNodeData = [];
-                var order = XrayManager.fixedNodeOrder;
-                for (var i = 0; i < order.length; i++) {
-                    var node = nodeMap.get(order[i]);
+                const order = XrayManager.fixedNodeOrder;
+                for (let i = 0; i < order.length; i++) {
+                    const node = nodeMap.get(order[i]);
                     if (node) {
                         orderedNodeData.push(node);
                         nodeMap.delete(order[i]);
                     }
                 }
-                var newNodes = Array.from(nodeMap.values());
+                const newNodes = Array.from(nodeMap.values());
                 if (newNodes.length > 0) {
                     newNodes.sort(function(a, b) { return a.tag.localeCompare(b.tag); });
                     orderedNodeData.push.apply(orderedNodeData, newNodes);
@@ -355,11 +443,11 @@ const NetworkManager = (function() {
 
             NodeManager.renderOutboundCards(orderedNodeData);
 
-            var allStatuses = await NodeManager.progressiveLoadStatuses(orderedNodeData);
+            const allStatuses = await NodeManager.progressiveLoadStatuses(orderedNodeData);
 
-            var bestNode = NodeManager.findBestNode(allStatuses);
+            const bestNode = NodeManager.findBestNode(allStatuses);
             if (bestNode && currentStatus.auto && !XrayManager.didInitialAutoSelect) {
-                var confirmed = await showModal('\u68C0\u6D4B\u5230\u66F4\u4F18\u8282\u70B9: ' + bestNode.tag + ' (\u5EF6\u8FDF: ' + bestNode.status.delay + 'ms)\n\u662F\u5426\u5207\u6362\uFF1F');
+                const confirmed = await showModal('\u68C0\u6D4B\u5230\u66F4\u4F18\u8282\u70B9: ' + bestNode.tag + ' (\u5EF6\u8FDF: ' + bestNode.status.delay + 'ms)\n\u662F\u5426\u5207\u6362\uFF1F');
                 if (confirmed) {
                     await this.applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
                     await this.loadCurrentOutbound();
@@ -377,8 +465,8 @@ const NetworkManager = (function() {
 function connectStatsSSE() {
     console.log('\u6B63\u5728\u8FDE\u63A5\u5230 /api/stats-sse...');
 
-    var statsContainer = document.getElementById('stats-container');
-    var statusBanner = document.createElement('div');
+    const statsContainer = document.getElementById('stats-container');
+    const statusBanner = document.createElement('div');
     statusBanner.id = 'sse-status-banner';
     statusBanner.style.display = 'none';
     statusBanner.className = 'text-center text-xs py-1.5 mt-3 mb-2 rounded-xl transition-colors duration-300';
@@ -396,10 +484,10 @@ function connectStatsSSE() {
         statsContainer.style.opacity = '0.7';
     }
 
-    var retryDelay = 1000;
-    var maxDelay = 30000;
-    var evtSource = null;
-    var reconnectTimer = null;
+    let retryDelay = 1000;
+    const maxDelay = 30000;
+    let evtSource = null;
+    let reconnectTimer = null;
 
     function connect() {
         if (reconnectTimer) {
@@ -415,7 +503,7 @@ function connectStatsSSE() {
 
         evtSource.addEventListener('update', function(event) {
             try {
-                var data = JSON.parse(event.data);
+                const data = JSON.parse(event.data);
                 UIManager.updateStatsUI(data);
                 if (XrayManager.pageReady && data.outbounds && Array.isArray(data.outbounds)) {
                     UIManager.updateAllCardStatuses(data.outbounds);
@@ -452,9 +540,9 @@ function connectStatsSSE() {
 const NodeManager = (function() {
     return {
         renderOutboundCards: function(allNodeData) {
-            var uiElements = UIManager.getElements();
-            var container = uiElements.outboundsList;
-            var currentChanged = XrayManager.prevCurrentOutbound !== XrayManager.currentOutbound;
+            const uiElements = UIManager.getElements();
+            const container = uiElements.outboundsList;
+            const currentChanged = XrayManager.prevCurrentOutbound !== XrayManager.currentOutbound;
             XrayManager.prevCurrentOutbound = XrayManager.currentOutbound;
 
             if (allNodeData.length === 0) {
@@ -464,7 +552,7 @@ const NodeManager = (function() {
 
             if (currentChanged) {
                 container.innerHTML = '';
-                for (var i = 0; i < allNodeData.length; i++) {
+                for (let i = 0; i < allNodeData.length; i++) {
                     if (allNodeData[i]) {
                         container.appendChild(this.createOutboundCard(allNodeData[i]));
                     }
@@ -472,16 +560,16 @@ const NodeManager = (function() {
                 return;
             }
 
-            var existingCards = {};
-            var cardEls = container.querySelectorAll('[data-tag]');
-            for (var j = 0; j < cardEls.length; j++) {
+            const existingCards = {};
+            const cardEls = container.querySelectorAll('[data-tag]');
+            for (let j = 0; j < cardEls.length; j++) {
                 existingCards[cardEls[j].getAttribute('data-tag')] = cardEls[j];
             }
 
-            for (var k = 0; k < allNodeData.length; k++) {
-                var node = allNodeData[k];
+            for (let k = 0; k < allNodeData.length; k++) {
+                const node = allNodeData[k];
                 if (!node) continue;
-                var card = existingCards[node.tag];
+                const card = existingCards[node.tag];
                 if (card) {
                     container.appendChild(card);
                     delete existingCards[node.tag];
@@ -490,20 +578,20 @@ const NodeManager = (function() {
                 }
             }
 
-            var tags = Object.keys(existingCards);
-            for (var m = 0; m < tags.length; m++) {
+            const tags = Object.keys(existingCards);
+            for (let m = 0; m < tags.length; m++) {
                 container.removeChild(existingCards[tags[m]]);
             }
         },
 
         progressiveLoadStatuses: async function(nodes) {
-            var statusMap = new Map();
+            const statusMap = new Map();
             try {
-                var res = await fetch('/api/outbounds-status');
+                const res = await fetch('/api/outbounds-status');
                 if (res.ok) {
-                    var allStatuses = await safeJson(res);
-                    for (var i = 0; i < allStatuses.length; i++) {
-                        var st = allStatuses[i];
+                    const allStatuses = await safeJson(res);
+                    for (let i = 0; i < allStatuses.length; i++) {
+                        const st = allStatuses[i];
                         if (st && st.tag) {
                             statusMap.set(st.tag, st);
                         }
@@ -513,8 +601,8 @@ const NodeManager = (function() {
                 console.error('\u6279\u91CF\u52A0\u8F7D\u72B6\u6001\u5931\u8D25:', e);
             }
 
-            var results = nodes.map(function(node) {
-                var status = statusMap.get(node.tag);
+            const results = nodes.map(function(node) {
+                let status = statusMap.get(node.tag);
                 if (!status) {
                     status = { alive: false, delay: 0, error: 'not_found' };
                 }
@@ -525,10 +613,10 @@ const NodeManager = (function() {
         },
 
         findBestNode: function(allStatuses) {
-            var bestNode = null;
-            var minDelay = Infinity;
-            for (var i = 0; i < allStatuses.length; i++) {
-                var ns = allStatuses[i];
+            let bestNode = null;
+            let minDelay = Infinity;
+            for (let i = 0; i < allStatuses.length; i++) {
+                const ns = allStatuses[i];
                 if (ns && ns.status && ns.status.alive && ns.status.delay > 0) {
                     if (ns.status.delay < minDelay) {
                         minDelay = ns.status.delay;
@@ -540,11 +628,11 @@ const NodeManager = (function() {
         },
 
         createOutboundCard: function(node) {
-            var tag = node.tag;
-            var protocol = (node.protocol || 'unknown').toUpperCase();
-            var isCurrent = tag === XrayManager.currentOutbound;
+            const tag = node.tag;
+            const protocol = (node.protocol || 'unknown').toUpperCase();
+            const isCurrent = tag === XrayManager.currentOutbound;
 
-            var card = document.createElement('div');
+            const card = document.createElement('div');
             card.setAttribute('data-tag', tag);
             card.setAttribute('tabindex', '0');
             card.setAttribute('role', 'button');
@@ -552,13 +640,13 @@ const NodeManager = (function() {
             card.className = 'card-hover bg-white/10 backdrop-blur p-3 md:p-4 rounded-xl shadow-lg border ' +
                 (isCurrent ? 'border-cyan-400 current-indicator' : 'border-white/20');
 
-            var inner = document.createElement('div');
+            const inner = document.createElement('div');
             inner.className = 'relative';
 
             if (isCurrent) {
-                var badge = document.createElement('div');
+                const badge = document.createElement('div');
                 badge.className = 'absolute top-2 right-2 bg-cyan-500/90 text-white px-2 py-1 rounded-md text-xs font-bold flex items-center gap-1';
-                var dot = document.createElement('span');
+                const dot = document.createElement('span');
                 dot.className = 'pulse-ring';
                 dot.textContent = '\u25CF';
                 badge.appendChild(dot);
@@ -567,22 +655,22 @@ const NodeManager = (function() {
                 card.style.cursor = 'default';
             }
 
-            var body = document.createElement('div');
+            const body = document.createElement('div');
             body.className = 'mb-2 md:mb-3';
 
-            var tagDiv = document.createElement('div');
+            const tagDiv = document.createElement('div');
             tagDiv.className = 'font-mono text-sm md:text-lg font-bold text-white mb-1 truncate';
             tagDiv.textContent = tag;
             tagDiv.title = tag;
 
-            var protoDiv = document.createElement('div');
+            const protoDiv = document.createElement('div');
             protoDiv.className = 'text-xs text-cyan-200 font-semibold mb-2';
             protoDiv.textContent = protocol;
 
             body.appendChild(tagDiv);
             body.appendChild(protoDiv);
 
-            var statusDiv = document.createElement('div');
+            const statusDiv = document.createElement('div');
             statusDiv.id = 'status-' + tag;
             statusDiv.className = 'flex items-center gap-2 text-xs text-white/70';
             statusDiv.textContent = '\u25CB \u6B63\u5728 PING...';
@@ -612,23 +700,23 @@ function formatBytes(bytes, decimals) {
     if (decimals === undefined) decimals = 0;
     if (typeof bytes !== 'number' || isNaN(bytes) || bytes < 0) return '0 Bytes';
     if (bytes === 0) return '0 Bytes';
-    var k = 1024;
-    var sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
-    var i = Math.floor(Math.log(bytes) / Math.log(k));
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
 }
 
 function formatDuration(totalSeconds) {
     if (typeof totalSeconds !== 'number' || isNaN(totalSeconds)) return '0s';
     if (totalSeconds <= 0) return '0s';
-    var remaining = totalSeconds;
-    var days = Math.floor(remaining / 86400);
+    let remaining = totalSeconds;
+    const days = Math.floor(remaining / 86400);
     remaining %= 86400;
-    var hours = Math.floor(remaining / 3600);
+    const hours = Math.floor(remaining / 3600);
     remaining %= 3600;
-    var minutes = Math.floor(remaining / 60);
-    var seconds = remaining % 60;
-    var result = '';
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining % 60;
+    let result = '';
     if (days > 0) result += days + 'd ';
     if (hours > 0) result += hours + 'h ';
     if (minutes > 0) result += minutes + 'm ';

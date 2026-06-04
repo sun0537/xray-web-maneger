@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -34,48 +35,31 @@ func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
 	return lrw.ResponseWriter
 }
 
-var writerPool = sync.Pool{
-	New: func() interface{} {
-		return &loggingResponseWriter{}
-	},
-}
-
 type ctxKey struct{}
 
 var clientIPKey ctxKey
 
-var trustProxyHeaders bool
-
-// SetTrustProxyHeaders configures whether to trust X-Real-IP / X-Forwarded-For headers.
-func SetTrustProxyHeaders(trust bool) {
-	trustProxyHeaders = trust
-}
-
-func Logger(next http.Handler) http.Handler {
+func Logger(trustProxy bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r, trustProxyHeaders)
+		ip := clientIP(r, trustProxy)
 		r = r.WithContext(context.WithValue(r.Context(), clientIPKey, ip))
 
 		start := time.Now()
-		lrw := writerPool.Get().(*loggingResponseWriter)
-		lrw.ResponseWriter = w
-		lrw.statusCode = http.StatusOK
+		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		defer func() {
 			log.Printf("%s %s %s %d %v", ip, r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
-			lrw.ResponseWriter = nil
-			writerPool.Put(lrw)
 		}()
 		next.ServeHTTP(lrw, r)
 	})
 }
 
 // GetClientIP returns the client IP cached by the Logger middleware.
-// Falls back to clientIP(r, trustProxyHeaders) if Logger is not in the chain.
+// Falls back to clientIP(r, false) if Logger is not in the chain.
 func GetClientIP(r *http.Request) string {
 	if ip, ok := r.Context().Value(clientIPKey).(string); ok {
 		return ip
 	}
-	return clientIP(r, trustProxyHeaders)
+	return clientIP(r, false)
 }
 
 func Recovery(next http.Handler) http.Handler {
@@ -166,30 +150,48 @@ var limiter = rateLimiter{
 	window:   time.Minute,
 }
 
-var limiterOnce sync.Once
+var limiterMu sync.Mutex
+var limiterStarted bool
+var limiterStop chan struct{}
 
-func startCleanup(ctx context.Context) {
-	limiterOnce.Do(func() {
-		go func() {
-			ticker := time.NewTicker(2 * time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					limiter.Lock()
-					now := time.Now()
-					for ip, sw := range limiter.requests {
-						if now.Sub(sw.windowStart) > limiter.window*2 {
-							delete(limiter.requests, ip)
-						}
+func startCleanup() {
+	limiterMu.Lock()
+	defer limiterMu.Unlock()
+	if limiterStarted {
+		return
+	}
+	limiterStarted = true
+	limiterStop = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-limiterStop:
+				return
+			case <-ticker.C:
+				limiter.Lock()
+				now := time.Now()
+				for ip, sw := range limiter.requests {
+					if now.Sub(sw.windowStart) > limiter.window*2 {
+						delete(limiter.requests, ip)
 					}
-					limiter.Unlock()
 				}
+				limiter.Unlock()
 			}
-		}()
-	})
+		}
+	}()
+}
+
+// StopCleanup stops the background cleanup goroutine for the rate limiter.
+// Call this during server shutdown to release resources.
+func StopCleanup() {
+	limiterMu.Lock()
+	defer limiterMu.Unlock()
+	if limiterStop != nil {
+		close(limiterStop)
+		limiterStop = nil
+	}
 }
 
 // checkAndRecord atomically checks the rate limit and records the request.
@@ -243,7 +245,7 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 
 func (rl *rateLimiter) cleanupStaleKeys(now time.Time) {
 	for ip, sw := range rl.requests {
-		if now.Sub(sw.windowStart) > rl.window {
+		if now.Sub(sw.windowStart) > rl.window*2 {
 			delete(rl.requests, ip)
 		}
 	}
@@ -270,13 +272,76 @@ func clientIP(r *http.Request, trustProxy bool) string {
 	return host
 }
 
+// ErrorResponse is the standard JSON body for error responses.
+type ErrorResponse struct {
+	Error     string `json:"error"`
+	ErrorType string `json:"error_type"`
+}
+
+// simpleAuthRateLimit tracks failed authentication attempts per IP.
+// It uses a simple counter (not sliding window) since brute-force
+// protection is more important than smooth rate limiting here.
+type simpleAuthRateLimit struct {
+	sync.Mutex
+	attempts    map[string]int
+	blockedAt   map[string]time.Time
+	limit       int
+	blockWindow time.Duration
+}
+
+var authLimiter = simpleAuthRateLimit{
+	attempts:    make(map[string]int),
+	blockedAt:   make(map[string]time.Time),
+	limit:       5,
+	blockWindow: 5 * time.Minute,
+}
+
+// isAuthBlocked checks if an IP is currently blocked from authentication.
+func (a *simpleAuthRateLimit) isAuthBlocked(ip string) bool {
+	a.Lock()
+	defer a.Unlock()
+
+	if blocked, ok := a.blockedAt[ip]; ok {
+		if time.Since(blocked) < a.blockWindow {
+			return true
+		}
+		// Block expired, reset
+		delete(a.blockedAt, ip)
+		a.attempts[ip] = 0
+	}
+	return false
+}
+
+// recordAuthFailure increments the failure counter and blocks the IP
+// if the limit is exceeded.
+func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
+	a.Lock()
+	defer a.Unlock()
+
+	a.attempts[ip]++
+	if a.attempts[ip] >= a.limit {
+		a.blockedAt[ip] = time.Now()
+		log.Printf("安全: IP %s 因认证失败次数过多已被临时封锁 %v", ip, a.blockWindow)
+	}
+}
+
 // 速率限制中间件
-func RateLimit(ctx context.Context, next http.Handler) http.Handler {
-	startCleanup(ctx)
+func RateLimit(trustProxy bool, next http.Handler) http.Handler {
+	startCleanup()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r, trustProxyHeaders)
+		ip := clientIP(r, trustProxy)
 		if !limiter.checkAndRecord(ip) {
-			http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			body, err := json.Marshal(ErrorResponse{
+				Error:     "请求过于频繁，请稍后再试",
+				ErrorType: "rate_limit",
+			})
+			if err != nil {
+				w.Write([]byte(`{"error":"rate limit exceeded","error_type":"rate_limit"}`))
+			} else {
+				w.Write(body)
+			}
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -301,12 +366,37 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := GetClientIP(r)
+
+			// Check if this IP is temporarily blocked due to too many auth failures
+			if authLimiter.isAuthBlocked(ip) {
+				w.Header().Set("Retry-After", "300")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				json.NewEncoder(w).Encode(ErrorResponse{
+					Error:     "认证失败次数过多，请 5 分钟后再试",
+					ErrorType: "auth_rate_limit",
+				})
+				return
+			}
+
 			user, pass, ok := r.BasicAuth()
 			if !ok ||
 				subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 ||
 				subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
+				authLimiter.recordAuthFailure(ip)
 				w.Header().Set("WWW-Authenticate", `Basic realm="Xray Manager"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				body, err := json.Marshal(ErrorResponse{
+					Error:     "Unauthorized",
+					ErrorType: "auth",
+				})
+				if err != nil {
+					w.Write([]byte(`{"error":"Unauthorized","error_type":"auth"}`))
+				} else {
+					w.Write(body)
+				}
 				return
 			}
 			next.ServeHTTP(w, r)

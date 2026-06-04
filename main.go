@@ -27,6 +27,28 @@ import (
 //go:embed frontend/index.html frontend/app.js frontend/style.css
 var frontendFS embed.FS
 
+// waitForReady polls the gRPC connection state until it reaches Ready,
+// TransientFailure, or the timeout expires. Returns true if Ready.
+func waitForReady(conn *grpc.ClientConn, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	poll := time.NewTicker(200 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-deadline:
+			return false
+		case <-poll.C:
+			state := conn.GetState()
+			if state == connectivity.Ready {
+				return true
+			}
+			if state == connectivity.TransientFailure {
+				return false
+			}
+		}
+	}
+}
+
 var devMode = flag.Bool("dev", false, "开发模式：使用外部文件而不是嵌入文件")
 var configPath = flag.String("config", "", "指定配置文件路径 (config.yaml)")
 
@@ -62,28 +84,18 @@ func main() {
 	}
 	defer conn.Close()
 
-	maxRetries := 3
+	const maxRetries = 3
+	const connectTimeout = 5 * time.Second
+
 	for i := 0; i < maxRetries; i++ {
 		conn.Connect()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if conn.WaitForStateChange(ctx, connectivity.Idle) {
-			state := conn.GetState()
-			cancel()
-			if state == connectivity.Ready {
-				break
-			}
-		} else {
-			cancel()
+		if waitForReady(conn, connectTimeout) {
+			break
 		}
 		log.Printf("连接失败 (尝试 %d/%d): 当前状态 %s", i+1, maxRetries, conn.GetState())
-		time.Sleep(2 * time.Second)
-	}
-
-	// Wait briefly for the connection to reach Ready if still Connecting
-	if conn.GetState() == connectivity.Connecting {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		conn.WaitForStateChange(ctx, connectivity.Connecting)
-		cancel()
+		if i < maxRetries-1 {
+			time.Sleep(2 * time.Second)
+		}
 	}
 
 	if conn.GetState() != connectivity.Ready {
@@ -92,13 +104,9 @@ func main() {
 
 	log.Println("已创建 gRPC 客户端连接")
 
-	middleware.SetTrustProxyHeaders(cfg.Server.TrustProxyHeaders)
-
 	sseMgr := sse.NewManager()
 	srv := server.NewServer(cfg, conn, sseMgr, time.Now())
-
-	rateLimitCtx, rateLimitCancel := context.WithCancel(context.Background())
-	defer rateLimitCancel()
+	srv.StartReconnectMonitor(conn)
 
 	mainMux := http.NewServeMux()
 	apiMux := http.NewServeMux()
@@ -111,9 +119,9 @@ func main() {
 
 	var finalHandler http.Handler = mainMux
 	finalHandler = middleware.SecurityHeaders(finalHandler)
-	finalHandler = middleware.RateLimit(rateLimitCtx, finalHandler)
+	finalHandler = middleware.RateLimit(cfg.Server.TrustProxyHeaders, finalHandler)
 	finalHandler = middleware.BasicAuth(cfg.Auth.Username, cfg.Auth.Password)(finalHandler)
-	finalHandler = middleware.Logger(finalHandler)
+	finalHandler = middleware.Logger(cfg.Server.TrustProxyHeaders, finalHandler)
 	finalHandler = middleware.Recovery(finalHandler)
 
 	addr := net.JoinHostPort(cfg.Server.Host, cfg.Server.Port)
@@ -142,10 +150,10 @@ func main() {
 	case sig := <-sigChan:
 		log.Printf("收到终止信号: %v，开始优雅关闭...", sig)
 
-		log.Println("阶段 1/3: 关闭 SSE 连接...")
+		log.Println("阶段 1/4: 关闭 SSE 连接...")
 		srv.Shutdown()
 
-		log.Println("阶段 2/3: 关闭 HTTP 服务器...")
+		log.Println("阶段 2/4: 关闭 HTTP 服务器...")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Printf("优雅关闭失败: %v，强制关闭", err)
@@ -153,6 +161,9 @@ func main() {
 		}
 		cancel()
 
-		log.Println("阶段 3/3: 优雅关闭完成")
+		log.Println("阶段 3/4: 停止速率限制清理协程...")
+		middleware.StopCleanup()
+
+		log.Println("阶段 4/4: 优雅关闭完成")
 	}
 }

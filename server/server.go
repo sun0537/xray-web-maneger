@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 
 	"xray-web-manager/config"
 	"xray-web-manager/sse"
@@ -19,8 +21,6 @@ import (
 	handlerpb "xray-web-manager/internal/xray-proto/app/proxyman/command"
 	routingpb "xray-web-manager/internal/xray-proto/app/router/command"
 	statspb "xray-web-manager/internal/xray-proto/app/stats/command"
-
-	"google.golang.org/grpc"
 )
 
 type cachedHealth struct {
@@ -61,7 +61,7 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 	}
 
 	s.broadcaster = sse.NewBroadcaster(func() ([]byte, error) {
-		stats, _, err := s.getCombinedStats(s.shutdownCtx)
+		stats, err := s.getCombinedStats(s.shutdownCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -90,6 +90,79 @@ func (s *Server) Shutdown() {
 	s.broadcaster.Stop()
 	log.Println("正在关闭 SSE 管理器...")
 	s.sseManager.CloseAll()
+}
+
+// reconnectMonitorInterval is how often we check gRPC connection health.
+const reconnectMonitorInterval = 5 * time.Second
+
+// reconnectRecoveryTimeout is the maximum time to wait for a reconnection
+// to reach Ready state after forcing conn.Connect().
+const reconnectRecoveryTimeout = 10 * time.Second
+
+// StartReconnectMonitor starts a background goroutine that monitors the
+// gRPC connection state. If the connection enters TRANSIENT_FAILURE, it
+// forces a reconnection attempt. This handles the case where Xray is
+// restarted while this service is running.
+// The monitor stops when the server's shutdown context is cancelled.
+func (s *Server) StartReconnectMonitor(conn *grpc.ClientConn) {
+	go func() {
+		ticker := time.NewTicker(reconnectMonitorInterval)
+		defer ticker.Stop()
+
+		wasConnected := true
+
+		for {
+			select {
+			case <-s.shutdownCtx.Done():
+				return
+			case <-ticker.C:
+			}
+
+			switch conn.GetState() {
+			case connectivity.Ready:
+				if !wasConnected {
+					log.Println("gRPC 连接已恢复")
+					wasConnected = true
+				}
+
+			case connectivity.TransientFailure:
+				if wasConnected {
+					log.Printf("gRPC 连接断开 (状态: %s)，尝试重连...", connectivity.TransientFailure)
+					wasConnected = false
+				}
+
+				conn.Connect()
+				if s.waitForReconnect(conn) {
+					log.Println("gRPC 连接重连成功")
+					wasConnected = true
+				} else {
+					log.Printf("gRPC 重连超时 (状态: %s)，将在 %v 后重试", conn.GetState(), reconnectMonitorInterval)
+				}
+
+			case connectivity.Idle, connectivity.Connecting:
+				// Idle: unused connection, gRPC will auto-wake on next RPC.
+				// Connecting: in-flight transition, check again next tick.
+
+			case connectivity.Shutdown:
+				// Connection is permanently closed; nothing to monitor.
+				return
+			}
+		}
+	}()
+}
+
+// waitForReconnect blocks until conn reaches Ready, the server is shutting
+// down, or reconnectRecoveryTimeout elapses. Returns true if Ready.
+func (s *Server) waitForReconnect(conn *grpc.ClientConn) bool {
+	ctx, cancel := context.WithTimeout(s.shutdownCtx, reconnectRecoveryTimeout)
+	defer cancel()
+
+	for conn.GetState() != connectivity.Ready {
+		if !conn.WaitForStateChange(ctx, conn.GetState()) {
+			return false
+		}
+	}
+	return true
 }
 
 // RegisterFrontend 负责注册静态文件服务

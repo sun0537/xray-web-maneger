@@ -3,11 +3,11 @@ package config
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -130,8 +130,18 @@ func ValidateConfig(config Config) error {
 		return fmt.Errorf("负载均衡器标签不能为空")
 	}
 
-	if !strings.Contains(config.Xray.ApiAddr, ":") {
-		return fmt.Errorf("无效的 API 地址格式，应为 host:port")
+	apiHost, apiPort, apiErr := net.SplitHostPort(config.Xray.ApiAddr)
+	if apiErr != nil {
+		return fmt.Errorf("无效的 API 地址格式 (需要 host:port): %w", apiErr)
+	}
+	if apiHost == "" {
+		return fmt.Errorf("API 地址的主机名不能为空 (如 localhost:10085)")
+	}
+	if apiPort == "" {
+		return fmt.Errorf("API 地址的端口不能为空 (如 localhost:10085)")
+	}
+	if p, err := strconv.Atoi(apiPort); err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("API 地址的端口号无效 (1-65535): %s", apiPort)
 	}
 
 	for _, origin := range config.Server.AllowedOrigins {

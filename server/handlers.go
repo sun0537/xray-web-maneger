@@ -24,6 +24,7 @@ const (
 	sseUpdateInterval    = 2 * time.Second
 	sseHeartbeatInterval = 15 * time.Second
 	apiTimeout           = 5 * time.Second
+	sseMaxLifetime       = 1 * time.Hour
 )
 
 var excludeProtocols = map[string]struct{}{
@@ -55,11 +56,6 @@ type HealthStatus struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
-type ErrorResponse struct {
-	Error     string `json:"error"`
-	ErrorType string `json:"error_type"`
-}
-
 type StatsData struct {
 	Uplink     int64                `json:"uplink"`
 	Downlink   int64                `json:"downlink"`
@@ -67,6 +63,7 @@ type StatsData struct {
 	SysMem     uint64               `json:"sys_mem"`
 	Goroutines int                  `json:"goroutines"`
 	Outbounds  []OutboundStatusData `json:"outbounds"`
+	Degraded   bool                 `json:"degraded,omitempty"`
 }
 
 type CurrentOutboundData struct {
@@ -248,12 +245,19 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
 
+	// Force reconnection after max lifetime to ensure auth is re-validated
+	lifetime := time.NewTimer(sseMaxLifetime)
+	defer lifetime.Stop()
+
 	// Push initial stats immediately so the client sees data without waiting for the first tick
-	if stats, _, err := s.getCombinedStats(connCtx); err == nil {
-		if jsonData, jerr := json.Marshal(stats); jerr == nil {
-			fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData)
-			flusher.Flush()
-		}
+	stats, statsErr := s.getCombinedStats(connCtx)
+	if statsErr != nil {
+		log.Printf("SSE 初始数据获取失败，发送降级数据: %v", statsErr)
+		stats = StatsData{Outbounds: []OutboundStatusData{}}
+	}
+	if jsonData, jerr := json.Marshal(stats); jerr == nil {
+		fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData)
+		flusher.Flush()
 	}
 
 	for {
@@ -262,6 +266,10 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 			if connCtx.Err() != context.Canceled {
 				log.Printf("SSE 连接结束 (非预期) - 请求来源: %s, 错误: %v", ip, connCtx.Err())
 			}
+			return
+
+		case <-lifetime.C:
+			log.Printf("SSE 连接达到最大存活时间 (%v)，强制重连 [请求来源: %s]", sseMaxLifetime, ip)
 			return
 
 		case <-heartbeat.C:
@@ -285,9 +293,8 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) getCombinedStats(ctx context.Context) (StatsData, bool, error) {
+func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	stats := StatsData{}
-	degraded := false
 
 	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
@@ -318,7 +325,7 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, bool, error) 
 
 	if queryErr != nil {
 		log.Printf("QueryStats 错误 [inbound流量统计]: %v", queryErr)
-		degraded = true
+		stats.Degraded = true
 	} else if queryResp != nil {
 		for _, stat := range queryResp.Stat {
 			if strings.HasSuffix(stat.Name, ">>>traffic>>>uplink") {
@@ -331,7 +338,7 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, bool, error) 
 
 	if sysErr != nil {
 		log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
-		degraded = true
+		stats.Degraded = true
 	} else if sysResp != nil {
 		stats.Uptime = int64(sysResp.GetUptime())
 		stats.SysMem = sysResp.GetSys()
@@ -339,7 +346,7 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, bool, error) 
 	}
 
 	stats.Outbounds = outboundStats
-	return stats, degraded, nil
+	return stats, nil
 }
 
 func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusData {
@@ -383,16 +390,27 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancel()
 			if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
-				return "disconnected", nil
+				return "disconnected", err
 			}
 			return "connected", nil
 		})
-		if err == nil {
-			xrayStatus = result.(string)
+		if err != nil {
+			log.Printf("健康检查失败: %v", err)
+		}
+		if status, ok := result.(string); ok {
+			xrayStatus = status
+			cacheTime := time.Now()
+			if err != nil {
+				// On failure, backdate the timestamp by 7s so the cache expires in ~3s,
+				// allowing a quick retry without flooding the gRPC backend.
+				cacheTime = cacheTime.Add(-7 * time.Second)
+			}
 			s.healthMu.Lock()
-			s.healthCache = cachedHealth{status: xrayStatus, timestamp: time.Now()}
+			s.healthCache = cachedHealth{status: xrayStatus, timestamp: cacheTime}
 			s.healthMu.Unlock()
 		}
+		// If type assertion fails (shouldn't happen), don't update the cache —
+		// keep the old cached value as-is to avoid stamping a stale timestamp.
 	}
 
 	health := HealthStatus{
@@ -413,5 +431,5 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 func jsonError(w http.ResponseWriter, message string, statusCode int, errorType string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(ErrorResponse{Error: message, ErrorType: errorType})
+	json.NewEncoder(w).Encode(middleware.ErrorResponse{Error: message, ErrorType: errorType})
 }
