@@ -48,9 +48,9 @@ func main() {
 	conn, err := grpc.NewClient(cfg.Xray.ApiAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
+			Time:                5 * time.Minute,
+			Timeout:             20 * time.Second,
+			PermitWithoutStream: false,
 		}),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff:           backoff.DefaultConfig,
@@ -69,7 +69,7 @@ func main() {
 		if conn.WaitForStateChange(ctx, connectivity.Idle) {
 			state := conn.GetState()
 			cancel()
-			if state == connectivity.Ready || state == connectivity.Connecting {
+			if state == connectivity.Ready {
 				break
 			}
 		} else {
@@ -79,11 +79,20 @@ func main() {
 		time.Sleep(2 * time.Second)
 	}
 
-	if conn.GetState() == connectivity.Idle || conn.GetState() == connectivity.TransientFailure {
-		log.Fatalf("无法连接到 Xray gRPC API (%s)，请检查配置", cfg.Xray.ApiAddr)
+	// Wait briefly for the connection to reach Ready if still Connecting
+	if conn.GetState() == connectivity.Connecting {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn.WaitForStateChange(ctx, connectivity.Connecting)
+		cancel()
+	}
+
+	if conn.GetState() != connectivity.Ready {
+		log.Fatalf("无法连接到 Xray gRPC API (%s)，当前状态: %s，请检查配置", cfg.Xray.ApiAddr, conn.GetState())
 	}
 
 	log.Println("已创建 gRPC 客户端连接")
+
+	middleware.SetTrustProxyHeaders(cfg.Server.TrustProxyHeaders)
 
 	sseMgr := sse.NewManager()
 	srv := server.NewServer(cfg, conn, sseMgr, time.Now())

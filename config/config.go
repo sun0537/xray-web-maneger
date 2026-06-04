@@ -14,9 +14,10 @@ import (
 
 // ServerConfig holds the HTTP server configuration.
 type ServerConfig struct {
-	Host           string   `yaml:"host"`            // 监听地址
-	Port           string   `yaml:"port"`            // 监听端口
-	AllowedOrigins []string `yaml:"allowed_origins"` // (可选) 允许访问的来源 (用于安全检查)
+	Host                string   `yaml:"host"`                  // 监听地址
+	Port                string   `yaml:"port"`                  // 监听端口
+	AllowedOrigins      []string `yaml:"allowed_origins"`       // (可选) 允许访问的来源 (用于安全检查)
+	TrustProxyHeaders   bool     `yaml:"trust_proxy_headers"`   // 是否信任 X-Real-IP / X-Forwarded-For 头 (仅在反向代理后设为 true)
 }
 
 // XrayConfig holds the Xray gRPC API connection configuration.
