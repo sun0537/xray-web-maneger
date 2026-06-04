@@ -2,11 +2,13 @@ package middleware
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -134,4 +136,132 @@ func captureLog(f func()) string {
 	f()
 	log.SetOutput(os.Stderr)
 	return buf.String()
+}
+
+func resetLimiter() {
+	limiter.Lock()
+	limiter.requests = make(map[string]slidingWindow)
+	limiter.cleanupCount = 0
+	limiter.Unlock()
+}
+
+func resetAuthLimiter() {
+	authLimiter.Lock()
+	authLimiter.attempts = make(map[string]int)
+	authLimiter.blockedAt = make(map[string]time.Time)
+	authLimiter.Unlock()
+}
+
+func TestRateLimit(t *testing.T) {
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	t.Run("Requests within limit pass", func(t *testing.T) {
+		resetLimiter()
+		handler := RateLimit(false, okHandler)
+
+		for i := 0; i < 10; i++ {
+			req := httptest.NewRequest("GET", "/api/test", nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			assert.Equal(t, http.StatusOK, rr.Code, "request %d should pass", i)
+		}
+	})
+
+	t.Run("Requests over limit get 429", func(t *testing.T) {
+		resetLimiter()
+		limiter.limit = 5
+		defer func() { limiter.limit = 100 }()
+
+		handler := RateLimit(false, okHandler)
+
+		for i := 0; i < 5; i++ {
+			req := httptest.NewRequest("GET", "/api/test", nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			assert.Equal(t, http.StatusOK, rr.Code, "request %d should pass", i)
+		}
+
+		req := httptest.NewRequest("GET", "/api/test", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusTooManyRequests, rr.Code, "6th request should be rate limited")
+
+		var resp ErrorResponse
+		err := json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.NoError(t, err)
+		assert.Equal(t, "rate_limit", resp.ErrorType)
+	})
+
+	t.Run("Different IPs tracked independently", func(t *testing.T) {
+		resetLimiter()
+		limiter.limit = 2
+		defer func() { limiter.limit = 100 }()
+
+		handler := RateLimit(true, okHandler)
+
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest("GET", "/api/test", nil)
+			req.Header.Set("X-Real-IP", "1.1.1.1")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			assert.Equal(t, http.StatusOK, rr.Code)
+		}
+
+		req := httptest.NewRequest("GET", "/api/test", nil)
+		req.Header.Set("X-Real-IP", "1.1.1.1")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusTooManyRequests, rr.Code, "IP 1.1.1.1 should be rate limited")
+
+		req2 := httptest.NewRequest("GET", "/api/test", nil)
+		req2.Header.Set("X-Real-IP", "2.2.2.2")
+		rr2 := httptest.NewRecorder()
+		handler.ServeHTTP(rr2, req2)
+		assert.Equal(t, http.StatusOK, rr2.Code, "IP 2.2.2.2 should still be allowed")
+	})
+}
+
+func TestAuthLimiter(t *testing.T) {
+	t.Run("Block after too many failures", func(t *testing.T) {
+		resetAuthLimiter()
+		authLimiter.limit = 3
+
+		ip := "10.0.0.1"
+		assert.False(t, authLimiter.isAuthBlocked(ip))
+
+		for i := 0; i < 3; i++ {
+			authLimiter.recordAuthFailure(ip)
+		}
+
+		assert.True(t, authLimiter.isAuthBlocked(ip), "IP should be blocked after 3 failures")
+	})
+
+	t.Run("Block expires after window", func(t *testing.T) {
+		resetAuthLimiter()
+		authLimiter.limit = 2
+		authLimiter.blockWindow = 50 * time.Millisecond
+
+		ip := "10.0.0.2"
+		authLimiter.recordAuthFailure(ip)
+		authLimiter.recordAuthFailure(ip)
+		assert.True(t, authLimiter.isAuthBlocked(ip))
+
+		time.Sleep(60 * time.Millisecond)
+
+		assert.False(t, authLimiter.isAuthBlocked(ip), "block should have expired")
+	})
+
+	t.Run("Different IPs independent", func(t *testing.T) {
+		resetAuthLimiter()
+		authLimiter.limit = 2
+
+		authLimiter.recordAuthFailure("10.0.0.3")
+		authLimiter.recordAuthFailure("10.0.0.3")
+
+		assert.True(t, authLimiter.isAuthBlocked("10.0.0.3"))
+		assert.False(t, authLimiter.isAuthBlocked("10.0.0.4"), "different IP should not be blocked")
+	})
 }

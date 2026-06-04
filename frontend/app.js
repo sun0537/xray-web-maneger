@@ -283,8 +283,11 @@ async function safeJson(response) {
  */
 function showRetryUI(container, message, retryFn, countdown) {
     if (countdown === undefined) countdown = 5;
+    if (container._retryTimer) {
+        clearInterval(container._retryTimer);
+        container._retryTimer = null;
+    }
     let remaining = countdown;
-    let timer = null;
 
     container.innerHTML = '';
     const wrapper = document.createElement('div');
@@ -306,13 +309,16 @@ function showRetryUI(container, message, retryFn, countdown) {
     }
 
     function doRetry() {
-        if (timer) clearInterval(timer);
+        if (container._retryTimer) {
+            clearInterval(container._retryTimer);
+            container._retryTimer = null;
+        }
         container.innerHTML = '<div class="text-white/70 text-center py-4 col-span-full">\u6B63\u5728\u91CD\u8BD5...</div>';
         retryFn();
     }
 
     updateDisplay();
-    timer = setInterval(function() {
+    container._retryTimer = setInterval(function() {
         remaining--;
         if (remaining <= 0) {
             doRetry();

@@ -323,9 +323,12 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	}()
 	wg.Wait()
 
+	failedSources := 0
+
 	if queryErr != nil {
 		log.Printf("QueryStats 错误 [inbound流量统计]: %v", queryErr)
 		stats.Degraded = true
+		failedSources++
 	} else if queryResp != nil {
 		for _, stat := range queryResp.Stat {
 			if strings.HasSuffix(stat.Name, ">>>traffic>>>uplink") {
@@ -339,13 +342,22 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	if sysErr != nil {
 		log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
 		stats.Degraded = true
+		failedSources++
 	} else if sysResp != nil {
 		stats.Uptime = int64(sysResp.GetUptime())
 		stats.SysMem = sysResp.GetSys()
 		stats.Goroutines = int(sysResp.GetNumGoroutine())
 	}
 
+	if outboundStats == nil {
+		failedSources++
+	}
+
 	stats.Outbounds = outboundStats
+
+	if failedSources >= 3 {
+		return stats, fmt.Errorf("all data sources failed")
+	}
 	return stats, nil
 }
 
@@ -431,5 +443,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 func jsonError(w http.ResponseWriter, message string, statusCode int, errorType string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(middleware.ErrorResponse{Error: message, ErrorType: errorType})
+	if err := json.NewEncoder(w).Encode(middleware.ErrorResponse{Error: message, ErrorType: errorType}); err != nil {
+		log.Printf("JSON error response write failed: %v", err)
+	}
 }

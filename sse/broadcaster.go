@@ -20,6 +20,7 @@ type Broadcaster struct {
 	fetchFn     func() ([]byte, error)
 	interval    time.Duration
 	stopCh      chan struct{}
+	loopDone    chan struct{}
 	stopped     bool
 }
 
@@ -37,13 +38,22 @@ func NewBroadcaster(fetchFn func() ([]byte, error), interval time.Duration) *Bro
 // Stop shuts down the background loop (if running) and closes all subscriber channels.
 func (b *Broadcaster) Stop() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	b.stopped = true
 	if b.stopCh != nil {
 		close(b.stopCh)
 		b.stopCh = nil
 	}
+	loopDone := b.loopDone
+	b.mu.Unlock()
+
+	// Wait for the loop goroutine to fully exit before closing channels,
+	// preventing a send-on-closed-channel panic.
+	if loopDone != nil {
+		<-loopDone
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	for ch := range b.subscribers {
 		close(ch)
 	}
@@ -67,7 +77,8 @@ func (b *Broadcaster) Subscribe() chan []byte {
 	b.subscribers[ch] = struct{}{}
 	if wasEmpty {
 		b.stopCh = make(chan struct{})
-		go b.loop(b.stopCh)
+		b.loopDone = make(chan struct{})
+		go b.loop(b.stopCh, b.loopDone)
 	}
 	return ch
 }
@@ -89,7 +100,9 @@ func (b *Broadcaster) Unsubscribe(ch chan []byte) {
 // a degraded event is pushed to subscribers so they know data is stale.
 const maxConsecutiveErrors = 3
 
-func (b *Broadcaster) loop(stopCh chan struct{}) {
+func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
+	defer close(loopDone)
+
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
 
