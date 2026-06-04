@@ -84,7 +84,6 @@ func CheckOrigin(allowedOrigins []string) func(http.Handler) http.Handler {
 	for _, origin := range allowedOrigins {
 		allowedMap[origin] = struct{}{}
 	}
-	log.Printf("安全: 已启用 Origin 检查, 允许的来源: %v", allowedOrigins)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +177,20 @@ func startCleanup() {
 					}
 				}
 				limiter.Unlock()
+
+				authLimiter.Lock()
+				for ip, t := range authLimiter.blockedAt {
+					if time.Since(t) >= authLimiter.blockWindow {
+						delete(authLimiter.blockedAt, ip)
+						delete(authLimiter.attempts, ip)
+					}
+				}
+				for ip := range authLimiter.attempts {
+					if _, blocked := authLimiter.blockedAt[ip]; !blocked {
+						delete(authLimiter.attempts, ip)
+					}
+				}
+				authLimiter.Unlock()
 			}
 		}
 	}()
