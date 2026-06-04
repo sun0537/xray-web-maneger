@@ -160,6 +160,49 @@ const NotificationManager = (function() {
     };
 })();
 
+function showModal(message) {
+    return new Promise(function(resolve) {
+        var overlay = document.createElement('div');
+        overlay.className = 'fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50';
+
+        var modal = document.createElement('div');
+        modal.className = 'bg-gray-800 border border-white/20 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl';
+
+        var msgEl = document.createElement('p');
+        msgEl.className = 'text-white text-sm mb-6 whitespace-pre-line';
+        msgEl.textContent = message;
+
+        var btnWrap = document.createElement('div');
+        btnWrap.className = 'flex gap-3 justify-end';
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.className = 'px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition duration-200';
+        cancelBtn.textContent = '\u53D6\u6D88';
+
+        var confirmBtn = document.createElement('button');
+        confirmBtn.className = 'px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-white text-sm font-semibold transition duration-200';
+        confirmBtn.textContent = '\u786E\u8BA4';
+
+        btnWrap.appendChild(cancelBtn);
+        btnWrap.appendChild(confirmBtn);
+        modal.appendChild(msgEl);
+        modal.appendChild(btnWrap);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        function cleanup(result) {
+            document.body.removeChild(overlay);
+            resolve(result);
+        }
+
+        cancelBtn.addEventListener('click', function() { cleanup(false); });
+        confirmBtn.addEventListener('click', function() { cleanup(true); });
+        overlay.addEventListener('click', function(e) {
+            if (e.target === overlay) cleanup(false);
+        });
+    });
+}
+
 window.addEventListener('error', function(e) {
     console.error('Global error:', e.error);
     NotificationManager.showNotification('\u53D1\u751F\u9519\u8BEF: ' + e.message, 'error');
@@ -193,15 +236,15 @@ window.addEventListener('beforeunload', function() {
     }
 });
 
-const NetworkManager = (function() {
-    async function safeJson(response) {
-        var contentType = response.headers.get('content-type') || '';
-        if (contentType.indexOf('application/json') !== -1) {
-            return await response.json();
-        }
-        throw new Error('Server returned non-JSON response (' + response.status + ')');
+async function safeJson(response) {
+    var contentType = response.headers.get('content-type') || '';
+    if (contentType.indexOf('application/json') !== -1) {
+        return await response.json();
     }
+    throw new Error('Server returned non-JSON response (' + response.status + ')');
+}
 
+const NetworkManager = (function() {
     return {
         loadConfig: async function() {
             try {
@@ -316,7 +359,8 @@ const NetworkManager = (function() {
 
             var bestNode = NodeManager.findBestNode(allStatuses);
             if (bestNode && currentStatus.auto && !XrayManager.didInitialAutoSelect) {
-                if (confirm('\u68C0\u6D4B\u5230\u66F4\u4F18\u8282\u70B9: ' + bestNode.tag + ' (\u5EF6\u8FDF: ' + bestNode.status.delay + 'ms)\n\u662F\u5426\u5207\u6362\uFF1F')) {
+                var confirmed = await showModal('\u68C0\u6D4B\u5230\u66F4\u4F18\u8282\u70B9: ' + bestNode.tag + ' (\u5EF6\u8FDF: ' + bestNode.status.delay + 'ms)\n\u662F\u5426\u5207\u6362\uFF1F');
+                if (confirmed) {
                     await this.applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
                     await this.loadCurrentOutbound();
                     NodeManager.renderOutboundCards(orderedNodeData);
@@ -355,10 +399,16 @@ function connectStatsSSE() {
     var retryDelay = 1000;
     var maxDelay = 30000;
     var evtSource = null;
+    var reconnectTimer = null;
 
     function connect() {
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
         if (evtSource) {
             evtSource.close();
+            evtSource = null;
         }
         evtSource = new EventSource('/api/stats-sse');
         window._sseEventSource = evtSource;
@@ -383,11 +433,15 @@ function connectStatsSSE() {
         };
 
         evtSource.onerror = function() {
+            if (reconnectTimer) return;
             evtSource.close();
             evtSource = null;
             showBanner();
             console.warn('SSE \u8FDE\u63A5\u9519\u8BEF\uFF0C' + (retryDelay / 1000) + 's \u540E\u91CD\u8FDE...');
-            setTimeout(connect, retryDelay);
+            reconnectTimer = setTimeout(function() {
+                reconnectTimer = null;
+                connect();
+            }, retryDelay);
             retryDelay = Math.min(retryDelay * 2, maxDelay);
         };
     }

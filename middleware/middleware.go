@@ -30,6 +30,10 @@ func (lrw *loggingResponseWriter) Flush() {
 	}
 }
 
+func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return lrw.ResponseWriter
+}
+
 var writerPool = sync.Pool{
 	New: func() interface{} {
 		return &loggingResponseWriter{}
@@ -40,9 +44,16 @@ type ctxKey struct{}
 
 var clientIPKey ctxKey
 
+var trustProxyHeaders bool
+
+// SetTrustProxyHeaders configures whether to trust X-Real-IP / X-Forwarded-For headers.
+func SetTrustProxyHeaders(trust bool) {
+	trustProxyHeaders = trust
+}
+
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := ClientIP(r)
+		ip := clientIP(r, trustProxyHeaders)
 		r = r.WithContext(context.WithValue(r.Context(), clientIPKey, ip))
 
 		start := time.Now()
@@ -59,12 +70,12 @@ func Logger(next http.Handler) http.Handler {
 }
 
 // GetClientIP returns the client IP cached by the Logger middleware.
-// Falls back to ClientIP(r) if Logger is not in the chain.
+// Falls back to clientIP(r, trustProxyHeaders) if Logger is not in the chain.
 func GetClientIP(r *http.Request) string {
 	if ip, ok := r.Context().Value(clientIPKey).(string); ok {
 		return ip
 	}
-	return ClientIP(r)
+	return clientIP(r, trustProxyHeaders)
 }
 
 func Recovery(next http.Handler) http.Handler {
@@ -238,16 +249,19 @@ func (rl *rateLimiter) cleanupStaleKeys(now time.Time) {
 	}
 }
 
-// ClientIP extracts the client IP from request headers or RemoteAddr.
-func ClientIP(r *http.Request) string {
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if idx := strings.Index(xff, ","); idx > 0 {
-			return strings.TrimSpace(xff[:idx])
+// clientIP extracts the client IP from request headers or RemoteAddr.
+// When trustProxy is false, only RemoteAddr is used to prevent IP spoofing.
+func clientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return strings.TrimSpace(xri)
 		}
-		return strings.TrimSpace(xff)
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if idx := strings.Index(xff, ","); idx > 0 {
+				return strings.TrimSpace(xff[:idx])
+			}
+			return strings.TrimSpace(xff)
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -260,7 +274,7 @@ func ClientIP(r *http.Request) string {
 func RateLimit(ctx context.Context, next http.Handler) http.Handler {
 	startCleanup(ctx)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := ClientIP(r)
+		ip := clientIP(r, trustProxyHeaders)
 		if !limiter.checkAndRecord(ip) {
 			http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
 			return

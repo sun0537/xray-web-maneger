@@ -373,38 +373,26 @@ func jsonResponse(w http.ResponseWriter, data any, statusCode int) {
 }
 
 func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	s.healthMu.Lock()
-	xrayStatus := s.cachedXrayStatus
-	needRefresh := time.Since(s.lastHealthCheck) > 10*time.Second
-	alreadyRefreshing := s.healthRefreshing
-	if needRefresh && !alreadyRefreshing {
-		s.healthRefreshing = true
-		s.healthWg.Add(1)
-		s.lastHealthCheck = time.Now()
-	}
-	s.healthMu.Unlock()
+	s.healthMu.RLock()
+	cached := s.healthCache
+	s.healthMu.RUnlock()
 
-	if needRefresh && alreadyRefreshing {
-		s.healthWg.Wait()
-		s.healthMu.Lock()
-		xrayStatus = s.cachedXrayStatus
-		s.healthMu.Unlock()
-		needRefresh = false
-	}
-
-	if needRefresh {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
-			xrayStatus = "disconnected"
-		} else {
-			xrayStatus = "connected"
+	xrayStatus := cached.status
+	if time.Since(cached.timestamp) > 10*time.Second {
+		result, err, _ := s.healthGroup.Do("xray-health", func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
+				return "disconnected", nil
+			}
+			return "connected", nil
+		})
+		if err == nil {
+			xrayStatus = result.(string)
+			s.healthMu.Lock()
+			s.healthCache = cachedHealth{status: xrayStatus, timestamp: time.Now()}
+			s.healthMu.Unlock()
 		}
-		cancel()
-		s.healthMu.Lock()
-		s.cachedXrayStatus = xrayStatus
-		s.healthRefreshing = false
-		s.healthMu.Unlock()
-		s.healthWg.Done()
 	}
 
 	health := HealthStatus{

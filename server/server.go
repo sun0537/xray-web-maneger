@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"xray-web-manager/config"
 	"xray-web-manager/sse"
 
@@ -20,6 +22,11 @@ import (
 
 	"google.golang.org/grpc"
 )
+
+type cachedHealth struct {
+	status    string
+	timestamp time.Time
+}
 
 // Server 结构体现在持有配置、SSE 管理器和启动时间
 type Server struct {
@@ -33,11 +40,9 @@ type Server struct {
 	startTime         time.Time
 	shutdownCtx       context.Context
 	shutdownCancel    context.CancelFunc
-	healthMu         sync.Mutex
-	lastHealthCheck  time.Time
-	cachedXrayStatus string
-	healthRefreshing bool
-	healthWg         sync.WaitGroup
+	healthGroup       singleflight.Group
+	healthMu          sync.RWMutex
+	healthCache       cachedHealth
 }
 
 // NewServer 是一个构造函数，用于创建 Server 实例

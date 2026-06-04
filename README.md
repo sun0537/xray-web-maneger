@@ -1,4 +1,4 @@
-# xray-web-maneger
+# xray-web-manager
 
 使用负载均衡出站 (Balancer) 进行节点切换，显示节点状态和系统占用信息
 
@@ -17,6 +17,7 @@
 server:
     host: 0.0.0.0
     port: "9098"
+    trust_proxy_headers: false
 xray:
     api_addr: localhost:10085
     balancer_tag: balancer
@@ -30,6 +31,7 @@ auth:
 ```
 - server.host:server.port 监听的 IP 和 端口，默认为 0.0.0.0:9098，web 服务监听的端口
 - allowed_origins: ["http://192.168.8.10:9098"] 允许访问的来源
+- trust_proxy_headers: true 是否信任 X-Real-IP / X-Forwarded-For 请求头来识别客户端真实 IP。仅在反向代理 (如 Nginx/Caddy) 后方时设为 true，默认 false
 - xray.api_addr 指向 Xray 的 gRPC API 地址
 - xray.balancer_tag 与 Xray 配置中的 routing.balancers.tag 一致
 
