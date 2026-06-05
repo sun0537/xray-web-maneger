@@ -233,6 +233,10 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	if elapsed > rl.window {
 		sw.prevCount = sw.currCount
 		sw.currCount = 0
+		// Integer division (elapsed/rl.window) floors to the number of complete
+		// windows to advance. This is intentional: the previous window's count
+		// is blended via overlap weighting, and any gap beyond one full window
+		// is absorbed by the reset of currCount.
 		sw.windowStart = sw.windowStart.Add(rl.window * (elapsed / rl.window))
 		elapsed = now.Sub(sw.windowStart)
 	}
@@ -338,23 +342,24 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 	}
 }
 
-// 速率限制中间件
+// RateLimit creates a middleware that limits requests per IP using the global limiter.
 func RateLimit(trustProxy bool, next http.Handler) http.Handler {
 	startCleanup()
+	return limiter.middleware(trustProxy, next)
+}
+
+// middleware returns an http.Handler that enforces rate limiting on this instance.
+func (rl *rateLimiter) middleware(trustProxy bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r, trustProxy)
-		if !limiter.checkAndRecord(ip) {
+		if !rl.checkAndRecord(ip) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
-			body, err := json.Marshal(ErrorResponse{
+			body, _ := json.Marshal(ErrorResponse{
 				Error:     "请求过于频繁，请稍后再试",
 				ErrorType: "rate_limit",
 			})
-			if err != nil {
-				w.Write([]byte(`{"error":"rate limit exceeded","error_type":"rate_limit"}`))
-			} else {
-				w.Write(body)
-			}
+			w.Write(body)
 			return
 		}
 		next.ServeHTTP(w, r)

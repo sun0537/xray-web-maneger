@@ -66,7 +66,7 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 			return nil, err
 		}
 		return json.Marshal(stats)
-	}, sseUpdateInterval)
+	}, computeBPS, sseUpdateInterval)
 
 	return s
 }
@@ -74,6 +74,7 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 // RegisterHandlers 负责注册所有路由
 func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", s.handleHealthCheck)
+	mux.HandleFunc("HEAD /api/health", s.handleHealthCheck)
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("GET /api/outbounds", s.handleGetOutbounds)
 	mux.HandleFunc("GET /api/outbounds-status", s.handleGetOutboundsStatus)
@@ -178,4 +179,38 @@ func RegisterFrontend(mux *http.ServeMux, devMode bool, frontendFS embed.FS) {
 		}
 		mux.Handle("/", http.FileServer(http.FS(subFS)))
 	}
+}
+
+// computeBPS enriches a marshaled StatsData with upload/download BPS values
+// computed from the delta between the current snapshot and prev. tickAt and
+// prevAt are captured at the start of each broadcaster tick (before the
+// gRPC fetch), so elapsed is the true wall-clock interval between samples.
+// When prev is nil (first fetch), the BPS fields are left at zero.
+func computeBPS(data []byte, prev []byte, tickAt, prevAt time.Time) []byte {
+	if prev == nil || prevAt.IsZero() {
+		return data
+	}
+	elapsed := tickAt.Sub(prevAt).Seconds()
+	if elapsed <= 0 {
+		return data
+	}
+
+	var curr, last StatsData
+	if json.Unmarshal(data, &curr) != nil || json.Unmarshal(prev, &last) != nil {
+		return data
+	}
+
+	curr.UplinkBPS = float64(curr.Uplink-last.Uplink) / elapsed
+	if curr.UplinkBPS < 0 {
+		curr.UplinkBPS = 0
+	}
+	curr.DownlinkBPS = float64(curr.Downlink-last.Downlink) / elapsed
+	if curr.DownlinkBPS < 0 {
+		curr.DownlinkBPS = 0
+	}
+
+	if enriched, err := json.Marshal(curr); err == nil {
+		return enriched
+	}
+	return data
 }

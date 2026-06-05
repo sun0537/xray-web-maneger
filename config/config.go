@@ -55,8 +55,20 @@ func newDefaultConfig() Config {
 
 func GetConfigPath(configPath string) (string, error) {
 	if configPath != "" {
-		log.Printf("信息: 正在使用标志指定的配置文件: %s", configPath)
-		return configPath, nil
+		cleaned := filepath.Clean(configPath)
+		if !filepath.IsAbs(cleaned) {
+			absPath, err := filepath.Abs(cleaned)
+			if err != nil {
+				return "", fmt.Errorf("无法解析配置文件路径: %w", err)
+			}
+			cleaned = absPath
+		}
+		ext := filepath.Ext(cleaned)
+		if ext != ".yaml" && ext != ".yml" {
+			return "", fmt.Errorf("配置文件必须是 .yaml 或 .yml 格式，得到: %s", ext)
+		}
+		log.Printf("信息: 正在使用标志指定的配置文件: %s", cleaned)
+		return cleaned, nil
 	}
 
 	exePath, err := os.Executable()
@@ -157,6 +169,10 @@ func ValidateConfig(config Config) error {
 func SaveDefaultConfig(filename string) error {
 	data, err := yaml.Marshal(newDefaultConfig())
 	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
 		return err
 	}
 

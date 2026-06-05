@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Xray Web Manager - 用于切换 Xray 出站节点的 Web 管理面板">
+    <meta property="og:title" content="Xray 节点管理">
+    <meta property="og:description" content="Xray Web Manager - 用于切换 Xray 出站节点的 Web 管理面板">
+    <meta property="og:type" content="website">
     <title>Xray 节点管理</title>
     <link href="./style.css" rel="stylesheet">
 </head>
@@ -28,11 +31,11 @@
             <div id="stats-container" class="mt-4 p-3 md:p-4 bg-white/10 rounded-xl border border-white/20 text-white/70">
                 <div class="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4 text-xs md:text-sm">
                     <div>
-                        <div>总上传 <span class="text-xs">(In)</span></div>
+                        <div>总上传 <span id="stats-uplink-speed" class="text-xs text-green-300/80"></span></div>
                         <div id="stats-uplink" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
                     </div>
                     <div>
-                        <div>总下载 <span class="text-xs">(In)</span></div>
+                        <div>总下载 <span id="stats-downlink-speed" class="text-xs text-green-300/80"></span></div>
                         <div id="stats-downlink" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
                     </div>
                     <div>
