@@ -430,7 +430,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 				return fresh.status, nil
 			}
 
-			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
 				return "disconnected", err
