@@ -8,8 +8,10 @@ import (
 )
 
 // Broadcaster periodically fetches data and fans it out to all subscribers.
-// The background polling loop starts lazily on the first Subscribe() call
-// and stops automatically when the last subscriber unsubscribes.
+// The background polling loop starts lazily on the first Subscribe() call.
+// When the last subscriber unsubscribes, the loop continues running for
+// idleTimeout before stopping, to avoid rapid start/stop cycles when SSE
+// clients briefly disconnect and reconnect.
 //
 // NOTE: fetchFn is called WITHOUT holding b.mu, so long-running fetches
 // (e.g. gRPC calls with multi-second timeouts) will NOT block Subscribe()
@@ -23,10 +25,15 @@ type Broadcaster struct {
 	stopCh      chan struct{}
 	loopDone    chan struct{}
 	stopped     bool
+	idleTimer   *time.Timer
 
 	lastMu        sync.RWMutex
 	lastBroadcast []byte
 }
+
+// broadcasterIdleTimeout is how long the polling loop stays alive after the
+// last subscriber unsubscribes, allowing quick reconnection without restarting.
+const broadcasterIdleTimeout = 10 * time.Second
 
 // NewBroadcaster creates a Broadcaster. fetchFn is called every interval;
 // its result is broadcast to all subscribers. If enrichFn is non-nil, it is
@@ -60,6 +67,10 @@ func (b *Broadcaster) Stop() {
 		return
 	}
 	b.stopped = true
+	if b.idleTimer != nil {
+		b.idleTimer.Stop()
+		b.idleTimer = nil
+	}
 	if b.stopCh != nil {
 		close(b.stopCh)
 		b.stopCh = nil
@@ -82,8 +93,8 @@ func (b *Broadcaster) Stop() {
 }
 
 // Subscribe returns a channel that receives broadcast payloads.
-// If this is the first subscriber, the background polling loop starts.
-// Call Unsubscribe when done to clean up.
+// If this is the first subscriber and the loop is not running, the background
+// polling loop starts. Call Unsubscribe when done to clean up.
 func (b *Broadcaster) Subscribe() chan []byte {
 	ch := make(chan []byte, 1)
 	b.mu.Lock()
@@ -94,7 +105,13 @@ func (b *Broadcaster) Subscribe() chan []byte {
 		return ch
 	}
 
-	wasEmpty := len(b.subscribers) == 0
+	// Cancel any pending idle shutdown — a subscriber is back.
+	if b.idleTimer != nil {
+		b.idleTimer.Stop()
+		b.idleTimer = nil
+	}
+
+	wasEmpty := len(b.subscribers) == 0 && b.stopCh == nil
 	b.subscribers[ch] = struct{}{}
 	if wasEmpty {
 		b.stopCh = make(chan struct{})
@@ -105,15 +122,23 @@ func (b *Broadcaster) Subscribe() chan []byte {
 }
 
 // Unsubscribe removes the subscriber. If this was the last subscriber,
-// the background polling loop is stopped to conserve resources.
+// the background polling loop is scheduled to stop after broadcasterIdleTimeout
+// to allow quick reconnection without restarting the polling goroutine.
 func (b *Broadcaster) Unsubscribe(ch chan []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	delete(b.subscribers, ch)
-	if len(b.subscribers) == 0 && b.stopCh != nil {
-		close(b.stopCh)
-		b.stopCh = nil
+	if len(b.subscribers) == 0 && b.stopCh != nil && b.idleTimer == nil {
+		b.idleTimer = time.AfterFunc(broadcasterIdleTimeout, func() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			if len(b.subscribers) == 0 && b.stopCh != nil {
+				close(b.stopCh)
+				b.stopCh = nil
+			}
+			b.idleTimer = nil
+		})
 	}
 }
 

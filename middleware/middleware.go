@@ -149,11 +149,13 @@ var limiter = rateLimiter{
 	window:   time.Minute,
 }
 
+// --- rateLimiter cleanup ---
+
 var limiterMu sync.Mutex
 var limiterStarted bool
 var limiterStop chan struct{}
 
-func startCleanup() {
+func startRateLimiterCleanup() {
 	limiterMu.Lock()
 	defer limiterMu.Unlock()
 	if limiterStarted {
@@ -177,17 +179,46 @@ func startCleanup() {
 					}
 				}
 				limiter.Unlock()
+			}
+		}
+	}()
+}
 
+// --- authLimiter cleanup ---
+
+var authCleanupMu sync.Mutex
+var authCleanupStarted bool
+var authCleanupStop chan struct{}
+
+func startAuthLimiterCleanup() {
+	authCleanupMu.Lock()
+	defer authCleanupMu.Unlock()
+	if authCleanupStarted {
+		return
+	}
+	authCleanupStarted = true
+	authCleanupStop = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-authCleanupStop:
+				return
+			case <-ticker.C:
 				authLimiter.Lock()
+				now := time.Now()
 				for ip, t := range authLimiter.blockedAt {
-					if time.Since(t) >= authLimiter.blockWindow {
+					if now.Sub(t) >= authLimiter.blockWindow {
 						delete(authLimiter.blockedAt, ip)
 						delete(authLimiter.attempts, ip)
 					}
 				}
-				for ip := range authLimiter.attempts {
+				for ip, count := range authLimiter.attempts {
 					if _, blocked := authLimiter.blockedAt[ip]; !blocked {
-						delete(authLimiter.attempts, ip)
+						if count == 0 {
+							delete(authLimiter.attempts, ip)
+						}
 					}
 				}
 				authLimiter.Unlock()
@@ -196,15 +227,22 @@ func startCleanup() {
 	}()
 }
 
-// StopCleanup stops the background cleanup goroutine for the rate limiter.
+// StopCleanup stops both the rate limiter and auth limiter cleanup goroutines.
 // Call this during server shutdown to release resources.
 func StopCleanup() {
 	limiterMu.Lock()
-	defer limiterMu.Unlock()
 	if limiterStop != nil {
 		close(limiterStop)
 		limiterStop = nil
 	}
+	limiterMu.Unlock()
+
+	authCleanupMu.Lock()
+	if authCleanupStop != nil {
+		close(authCleanupStop)
+		authCleanupStop = nil
+	}
+	authCleanupMu.Unlock()
 }
 
 // checkAndRecord atomically checks the rate limit and records the request.
@@ -344,7 +382,7 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 
 // RateLimit creates a middleware that limits requests per IP using the global limiter.
 func RateLimit(trustProxy bool, next http.Handler) http.Handler {
-	startCleanup()
+	startRateLimiterCleanup()
 	return limiter.middleware(trustProxy, next)
 }
 
@@ -381,6 +419,8 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 		log.Println("警告: BasicAuth 未配置 (username/password 为空)，API 将不进行认证保护")
 		return func(next http.Handler) http.Handler { return next }
 	}
+
+	startAuthLimiterCleanup()
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
