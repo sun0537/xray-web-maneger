@@ -18,26 +18,47 @@ type Broadcaster struct {
 	mu          sync.Mutex
 	subscribers map[chan []byte]struct{}
 	fetchFn     func() ([]byte, error)
+	enrichFn    func(data, prev []byte, tickAt, prevAt time.Time) []byte
 	interval    time.Duration
 	stopCh      chan struct{}
 	loopDone    chan struct{}
 	stopped     bool
+
+	lastMu        sync.RWMutex
+	lastBroadcast []byte
 }
 
 // NewBroadcaster creates a Broadcaster. fetchFn is called every interval;
-// its result is broadcast to all subscribers. The loop starts on first
-// Subscribe() — no need to call Start() manually.
-func NewBroadcaster(fetchFn func() ([]byte, error), interval time.Duration) *Broadcaster {
+// its result is broadcast to all subscribers. If enrichFn is non-nil, it is
+// invoked with the current and previous raw payloads plus their tick
+// timestamps (captured before the fetch), so it can derive additional
+// fields (e.g. BPS from cumulative counters) using the real elapsed time.
+// The loop starts on first Subscribe() — no need to call Start() manually.
+func NewBroadcaster(fetchFn func() ([]byte, error), enrichFn func(data, prev []byte, tickAt, prevAt time.Time) []byte, interval time.Duration) *Broadcaster {
 	return &Broadcaster{
 		subscribers: make(map[chan []byte]struct{}),
 		fetchFn:     fetchFn,
+		enrichFn:    enrichFn,
 		interval:    interval,
 	}
+}
+
+// LastBroadcast returns the most recent enriched broadcast payload.
+// Returns nil if no successful broadcast has occurred yet.
+// Safe for concurrent use.
+func (b *Broadcaster) LastBroadcast() []byte {
+	b.lastMu.RLock()
+	defer b.lastMu.RUnlock()
+	return b.lastBroadcast
 }
 
 // Stop shuts down the background loop (if running) and closes all subscriber channels.
 func (b *Broadcaster) Stop() {
 	b.mu.Lock()
+	if b.stopped {
+		b.mu.Unlock()
+		return
+	}
 	b.stopped = true
 	if b.stopCh != nil {
 		close(b.stopCh)
@@ -106,7 +127,8 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
 
-	var lastData []byte
+	var lastSnapshot []byte
+	var lastAt time.Time
 	consecutiveErrors := 0
 
 	for {
@@ -114,6 +136,7 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 		case <-stopCh:
 			return
 		case <-ticker.C:
+			tickAt := time.Now()
 			data, err := b.fetchFn()
 			if err != nil {
 				consecutiveErrors++
@@ -134,15 +157,27 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 
 			consecutiveErrors = 0
 
-			if bytes.Equal(lastData, data) {
+			// Dedup uses the raw snapshot so cumulative counters decide equality;
+			// derived fields (e.g. BPS) would otherwise defeat dedup.
+			if bytes.Equal(lastSnapshot, data) {
 				continue
 			}
-			lastData = data
+
+			broadcast := data
+			if b.enrichFn != nil {
+				broadcast = b.enrichFn(data, lastSnapshot, tickAt, lastAt)
+			}
+			lastSnapshot = data
+			lastAt = tickAt
+
+			b.lastMu.Lock()
+			b.lastBroadcast = broadcast
+			b.lastMu.Unlock()
 
 			b.mu.Lock()
 			for ch := range b.subscribers {
 				select {
-				case ch <- data:
+				case ch <- broadcast:
 				default:
 				}
 			}

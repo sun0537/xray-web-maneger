@@ -44,7 +44,6 @@ func (m *MockHandlerClient) ListOutbounds(ctx context.Context, in *handlerpb.Lis
 		},
 	}, nil
 }
-
 func (m *MockHandlerClient) AddInbound(ctx context.Context, in *handlerpb.AddInboundRequest, opts ...grpc.CallOption) (*handlerpb.AddInboundResponse, error) {
 	return nil, nil
 }
@@ -107,6 +106,12 @@ type MockRoutingClient struct {
 	routingpb.UnimplementedRoutingServiceServer
 }
 
+func (m *MockRoutingClient) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
+	return nil, nil
+}
+func (m *MockRoutingClient) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+	return nil, nil
+}
 func (m *MockRoutingClient) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
 	return nil, nil
 }
@@ -117,12 +122,6 @@ func (m *MockRoutingClient) AddRule(ctx context.Context, in *routingpb.AddRuleRe
 	return nil, nil
 }
 func (m *MockRoutingClient) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClient) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *MockRoutingClient) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (routingpb.RoutingService_SubscribeRoutingStatsClient, error) {
 	return nil, nil
 }
 func (m *MockRoutingClient) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
@@ -233,7 +232,7 @@ func TestHandleStatsSSE(t *testing.T) {
 		}
 		return json.Marshal(stats)
 	}
-	broadcaster := sse.NewBroadcaster(fetchFn, 100*time.Millisecond)
+	broadcaster := sse.NewBroadcaster(fetchFn, nil, 100*time.Millisecond)
 	defer broadcaster.Stop()
 
 	s := &Server{
@@ -295,6 +294,12 @@ type MockRoutingClientSuccess struct {
 	routingpb.UnimplementedRoutingServiceServer
 }
 
+func (m *MockRoutingClientSuccess) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
+	return nil, nil
+}
+func (m *MockRoutingClientSuccess) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+	return nil, nil
+}
 func (m *MockRoutingClientSuccess) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
 	return &routingpb.OverrideBalancerTargetResponse{}, nil
 }
@@ -305,12 +310,6 @@ func (m *MockRoutingClientSuccess) AddRule(ctx context.Context, in *routingpb.Ad
 	return nil, nil
 }
 func (m *MockRoutingClientSuccess) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientSuccess) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientSuccess) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (routingpb.RoutingService_SubscribeRoutingStatsClient, error) {
 	return nil, nil
 }
 func (m *MockRoutingClientSuccess) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {

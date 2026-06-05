@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -57,13 +59,15 @@ type HealthStatus struct {
 }
 
 type StatsData struct {
-	Uplink     int64                `json:"uplink"`
-	Downlink   int64                `json:"downlink"`
-	Uptime     int64                `json:"uptime"`
-	SysMem     uint64               `json:"sys_mem"`
-	Goroutines int                  `json:"goroutines"`
-	Outbounds  []OutboundStatusData `json:"outbounds"`
-	Degraded   bool                 `json:"degraded,omitempty"`
+	Uplink      int64                `json:"uplink"`
+	Downlink    int64                `json:"downlink"`
+	UplinkBPS   float64              `json:"uplink_bps"`
+	DownlinkBPS float64              `json:"downlink_bps"`
+	Uptime      int64                `json:"uptime"`
+	SysMem      uint64               `json:"sys_mem"`
+	Goroutines  int                  `json:"goroutines"`
+	Outbounds   []OutboundStatusData `json:"outbounds"`
+	Degraded    bool                 `json:"degraded,omitempty"`
 }
 
 type CurrentOutboundData struct {
@@ -170,6 +174,7 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		io.Copy(io.Discard, r.Body)
 		errorMsg := fmt.Sprintf("无效的请求体: %v", err)
 		log.Printf("切换出站失败 [请求来源: %s, 解码错误]: %s", middleware.GetClientIP(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusBadRequest, "validation")
@@ -204,6 +209,7 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("审计: 切换出站成功 [目标: %s, 请求来源: %s]", reqBody.OutboundTag, middleware.GetClientIP(r))
 	jsonResponse(w, successResponse{Status: "success"}, http.StatusOK)
 }
 
@@ -228,13 +234,13 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, errorMsg, http.StatusServiceUnavailable, "service_unavailable")
 		return
 	}
-	defer conn.Close()
 
 	ip := middleware.GetClientIP(r)
 	log.Printf("SSE 连接已建立 [请求来源: %s]，当前连接数: %d", ip, s.sseManager.Count())
 	defer func() {
 		s.sseManager.Remove(conn)
 		log.Printf("SSE 连接已断开 [请求来源: %s]，当前连接数: %d", ip, s.sseManager.Count())
+		conn.Close()
 	}()
 
 	connCtx := conn.Context()
@@ -249,14 +255,24 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	lifetime := time.NewTimer(sseMaxLifetime)
 	defer lifetime.Stop()
 
-	// Push initial stats immediately so the client sees data without waiting for the first tick
-	stats, statsErr := s.getCombinedStats(connCtx)
-	if statsErr != nil {
-		log.Printf("SSE 初始数据获取失败，发送降级数据: %v", statsErr)
-		stats = StatsData{Outbounds: []OutboundStatusData{}}
+	// Push initial stats immediately so the client sees data without waiting for the first tick.
+	// Prefer the broadcaster's cached snapshot to avoid a redundant gRPC round-trip;
+	// fall back to a fresh fetch only on the very first connection (before any tick).
+	var initialJSON []byte
+	if cached := s.broadcaster.LastBroadcast(); cached != nil {
+		initialJSON = cached
+	} else {
+		stats, statsErr := s.getCombinedStats(connCtx)
+		if statsErr != nil {
+			if !errors.Is(statsErr, context.Canceled) {
+				log.Printf("SSE 初始数据获取失败，发送降级数据: %v", statsErr)
+			}
+			stats = StatsData{Outbounds: []OutboundStatusData{}}
+		}
+		initialJSON, _ = json.Marshal(stats)
 	}
-	if jsonData, jerr := json.Marshal(stats); jerr == nil {
-		fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData)
+	if initialJSON != nil {
+		fmt.Fprintf(w, "event: update\ndata: %s\n\n", initialJSON)
 		flusher.Flush()
 	}
 
@@ -326,6 +342,9 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	failedSources := 0
 
 	if queryErr != nil {
+		if errors.Is(queryErr, context.Canceled) {
+			return stats, queryErr
+		}
 		log.Printf("QueryStats 错误 [inbound流量统计]: %v", queryErr)
 		stats.Degraded = true
 		failedSources++
@@ -340,9 +359,11 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	}
 
 	if sysErr != nil {
-		log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
-		stats.Degraded = true
-		failedSources++
+		if !errors.Is(sysErr, context.Canceled) {
+			log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
+			stats.Degraded = true
+			failedSources++
+		}
 	} else if sysResp != nil {
 		stats.Uptime = int64(sysResp.GetUptime())
 		stats.SysMem = sysResp.GetSys()
@@ -364,7 +385,9 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusData {
 	resp, err := s.observatoryClient.GetOutboundStatus(ctx, &observatorypb.GetOutboundStatusRequest{})
 	if err != nil {
-		log.Printf("警告: GetOutboundStatus 失败: %v", err)
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("警告: GetOutboundStatus 失败: %v", err)
+		}
 		return nil
 	}
 
@@ -399,6 +422,14 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	xrayStatus := cached.status
 	if time.Since(cached.timestamp) > 10*time.Second {
 		result, err, _ := s.healthGroup.Do("xray-health", func() (interface{}, error) {
+			// Re-read cache inside singleflight to avoid stale closure capture.
+			s.healthMu.RLock()
+			fresh := s.healthCache
+			s.healthMu.RUnlock()
+			if time.Since(fresh.timestamp) <= 10*time.Second {
+				return fresh.status, nil
+			}
+
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancel()
 			if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
@@ -406,9 +437,6 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 			}
 			return "connected", nil
 		})
-		if err != nil {
-			log.Printf("健康检查失败: %v", err)
-		}
 		if status, ok := result.(string); ok {
 			xrayStatus = status
 			cacheTime := time.Now()
@@ -421,8 +449,6 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 			s.healthCache = cachedHealth{status: xrayStatus, timestamp: cacheTime}
 			s.healthMu.Unlock()
 		}
-		// If type assertion fails (shouldn't happen), don't update the cache —
-		// keep the old cached value as-is to avoid stamping a stale timestamp.
 	}
 
 	health := HealthStatus{

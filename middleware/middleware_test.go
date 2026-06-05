@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -132,9 +131,13 @@ func TestCheckOrigin(t *testing.T) {
 // 辅助函数：用于捕获 log.Printf 的输出
 func captureLog(f func()) string {
 	var buf bytes.Buffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
 	log.SetOutput(&buf)
+	log.SetFlags(0) // suppress timestamps for predictable output
 	f()
-	log.SetOutput(os.Stderr)
+	log.SetOutput(origOutput)
+	log.SetFlags(origFlags)
 	return buf.String()
 }
 
@@ -159,8 +162,12 @@ func TestRateLimit(t *testing.T) {
 	})
 
 	t.Run("Requests within limit pass", func(t *testing.T) {
-		resetLimiter()
-		handler := RateLimit(false, okHandler)
+		rl := &rateLimiter{
+			requests: make(map[string]slidingWindow),
+			limit:    100,
+			window:   time.Minute,
+		}
+		handler := rl.middleware(false, okHandler)
 
 		for i := 0; i < 10; i++ {
 			req := httptest.NewRequest("GET", "/api/test", nil)
@@ -171,11 +178,12 @@ func TestRateLimit(t *testing.T) {
 	})
 
 	t.Run("Requests over limit get 429", func(t *testing.T) {
-		resetLimiter()
-		limiter.limit = 5
-		defer func() { limiter.limit = 100 }()
-
-		handler := RateLimit(false, okHandler)
+		rl := &rateLimiter{
+			requests: make(map[string]slidingWindow),
+			limit:    5,
+			window:   time.Minute,
+		}
+		handler := rl.middleware(false, okHandler)
 
 		for i := 0; i < 5; i++ {
 			req := httptest.NewRequest("GET", "/api/test", nil)
@@ -196,11 +204,12 @@ func TestRateLimit(t *testing.T) {
 	})
 
 	t.Run("Different IPs tracked independently", func(t *testing.T) {
-		resetLimiter()
-		limiter.limit = 2
-		defer func() { limiter.limit = 100 }()
-
-		handler := RateLimit(true, okHandler)
+		rl := &rateLimiter{
+			requests: make(map[string]slidingWindow),
+			limit:    2,
+			window:   time.Minute,
+		}
+		handler := rl.middleware(true, okHandler)
 
 		for i := 0; i < 2; i++ {
 			req := httptest.NewRequest("GET", "/api/test", nil)

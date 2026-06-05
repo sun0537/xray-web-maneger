@@ -38,6 +38,8 @@ const UIManager = (function() {
     const els = {
         uplink: $('stats-uplink'),
         downlink: $('stats-downlink'),
+        uplinkSpeed: $('stats-uplink-speed'),
+        downlinkSpeed: $('stats-downlink-speed'),
         uptime: $('stats-uptime'),
         sysMem: $('stats-sys-mem'),
         goroutines: $('stats-goroutines'),
@@ -58,6 +60,13 @@ const UIManager = (function() {
             els.uptime.textContent = formatDuration(data.uptime);
             els.sysMem.textContent = formatBytes(data.sys_mem);
             els.goroutines.textContent = data.goroutines;
+
+            // Show real-time speed next to cumulative totals (BPS from server delta).
+            var upBps = typeof data.uplink_bps === 'number' ? data.uplink_bps : 0;
+            var downBps = typeof data.downlink_bps === 'number' ? data.downlink_bps : 0;
+            els.uplinkSpeed.textContent = upBps > 0 ? ('↑ ' + formatBytes(upBps) + '/s') : '';
+            els.downlinkSpeed.textContent = downBps > 0 ? ('↓ ' + formatBytes(downBps) + '/s') : '';
+
             // Show subtle indicator when stats are partially degraded
             if (data.degraded) {
                 els.uplink.title = '数据可能不完整 (部分数据源不可用)';
@@ -492,8 +501,29 @@ function connectStatsSSE() {
 
     let retryDelay = 1000;
     const maxDelay = 30000;
+    const maxRetries = 10;
+    let retryCount = 0;
     let evtSource = null;
     let reconnectTimer = null;
+
+    function showPermanentDisconnect() {
+        statusBanner.innerHTML = '';
+        var msg = document.createElement('span');
+        msg.textContent = '\u274C \u5B9E\u65F6\u6570\u636E\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF08\u91CD\u8BD5\u5DF2\u8FBE\u4E0A\u9650\uFF09';
+        statusBanner.appendChild(msg);
+        var btn = document.createElement('button');
+        btn.textContent = '\u91CD\u65B0\u8FDE\u63A5';
+        btn.className = 'ml-2 px-2 underline text-yellow-100 hover:text-white';
+        btn.addEventListener('click', function() {
+            retryCount = 0;
+            retryDelay = 1000;
+            connect();
+        });
+        statusBanner.appendChild(btn);
+        statusBanner.style.display = '';
+        statusBanner.className = 'text-center text-xs py-1.5 mt-3 mb-2 rounded-xl bg-red-600/50 text-red-200 transition-colors duration-300';
+        statsContainer.style.opacity = '0.5';
+    }
 
     function connect() {
         if (reconnectTimer) {
@@ -523,6 +553,7 @@ function connectStatsSSE() {
         evtSource.onopen = function() {
             console.log('SSE \u8FDE\u63A5\u5DF2\u5EFA\u7ACB');
             retryDelay = 1000;
+            retryCount = 0;
             hideBanner();
         };
 
@@ -530,8 +561,13 @@ function connectStatsSSE() {
             if (reconnectTimer) return;
             evtSource.close();
             evtSource = null;
+            retryCount++;
+            if (retryCount >= maxRetries) {
+                showPermanentDisconnect();
+                return;
+            }
             showBanner();
-            console.warn('SSE \u8FDE\u63A5\u9519\u8BEF\uFF0C' + (retryDelay / 1000) + 's \u540E\u91CD\u8FDE...');
+            console.warn('SSE \u8FDE\u63A5\u9519\u8BEF\uFF0C' + (retryDelay / 1000) + 's \u540E\u91CD\u8FDE... (' + retryCount + '/' + maxRetries + ')');
             reconnectTimer = setTimeout(function() {
                 reconnectTimer = null;
                 connect();
