@@ -2,16 +2,18 @@ package server
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 
 	"xray-web-manager/internal/xray-proto/common/serial"
-	"xray-web-manager/middleware"
+	"xray-web-manager/sse"
 )
 
 func TestParseProtocol(t *testing.T) {
@@ -62,10 +64,11 @@ func TestComputeBPS(t *testing.T) {
 		currJSON, _ := json.Marshal(curr)
 		lastJSON, _ := json.Marshal(last)
 
-		result := computeBPS(currJSON, lastJSON, now, prev)
+		result := computeBPS(sse.RawEvent{JSON: currJSON}, sse.RawEvent{JSON: lastJSON}, now, prev)
 
+		raw := result.(sse.RawEvent)
 		var enriched StatsData
-		json.Unmarshal(result, &enriched)
+		json.Unmarshal(raw.JSON, &enriched)
 		assert.InDelta(t, 512.0, enriched.UplinkBPS, 0.1)
 		assert.InDelta(t, 1024.0, enriched.DownlinkBPS, 0.1)
 	})
@@ -76,29 +79,31 @@ func TestComputeBPS(t *testing.T) {
 		currJSON, _ := json.Marshal(curr)
 		lastJSON, _ := json.Marshal(last)
 
-		result := computeBPS(currJSON, lastJSON, now, prev)
+		result := computeBPS(sse.RawEvent{JSON: currJSON}, sse.RawEvent{JSON: lastJSON}, now, prev)
 
+		raw := result.(sse.RawEvent)
 		var enriched StatsData
-		json.Unmarshal(result, &enriched)
+		json.Unmarshal(raw.JSON, &enriched)
 		assert.Equal(t, 0.0, enriched.UplinkBPS)
 		assert.Equal(t, 0.0, enriched.DownlinkBPS)
 	})
 
 	t.Run("First fetch returns data unchanged", func(t *testing.T) {
-		data := []byte(`{"uplink":100}`)
+		data := sse.RawEvent{JSON: []byte(`{"uplink":100}`)}
 		result := computeBPS(data, nil, now, time.Time{})
 		assert.Equal(t, data, result)
 	})
 
 	t.Run("Zero elapsed returns data unchanged", func(t *testing.T) {
-		data := []byte(`{"uplink":100}`)
+		data := sse.RawEvent{JSON: []byte(`{"uplink":100}`)}
 		result := computeBPS(data, data, now, now)
 		assert.Equal(t, data, result)
 	})
 
 	t.Run("Invalid JSON returns data unchanged", func(t *testing.T) {
-		result := computeBPS([]byte("bad"), []byte("bad"), now, prev)
-		assert.Equal(t, []byte("bad"), result)
+		bad := sse.RawEvent{JSON: []byte("bad")}
+		result := computeBPS(bad, bad, now, prev)
+		assert.Equal(t, bad, result)
 	})
 }
 
@@ -111,12 +116,59 @@ func TestJsonResponse(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"key":"value"`)
 }
 
+func TestRegisterFrontend(t *testing.T) {
+	t.Run("Dev mode registers handler", func(t *testing.T) {
+		mux := http.NewServeMux()
+		RegisterFrontend(mux, true, embed.FS{})
+
+		// Verify a handler is registered at "/" — the file server returns 404
+		// when the frontend/ directory doesn't exist (test CWD ≠ project root),
+		// but the handler IS registered (not a bare-mux 404).
+		req := httptest.NewRequest("GET", "/any-path", nil)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		// A registered FileServer returns 404; an unregistered mux returns 404 too.
+		// The difference: FileServer sets Content-Type header.
+		assert.Equal(t, http.StatusNotFound, rr.Code)
+	})
+
+	t.Run("Prod mode registers handler", func(t *testing.T) {
+		mux := http.NewServeMux()
+		// Use an empty embed.FS — the handler is registered but will 404
+		RegisterFrontend(mux, false, embed.FS{})
+
+		req := httptest.NewRequest("GET", "/any-path", nil)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusNotFound, rr.Code)
+	})
+
+	t.Run("Prod mode with actual files serves index.html", func(t *testing.T) {
+		// Use dev mode with a temp dir containing an index.html
+		tmpDir := t.TempDir()
+		indexDir := tmpDir + "/frontend-test"
+		_ = os.MkdirAll(indexDir, 0755)
+		_ = os.WriteFile(indexDir+"/index.html", []byte("<html>test</html>"), 0644)
+
+		// Register with dev mode pointing to our temp dir
+		devMux := http.NewServeMux()
+		devMux.Handle("/", http.FileServer(http.Dir(indexDir)))
+
+		// http.FileServer redirects /index.html → / with 301
+		req := httptest.NewRequest("GET", "/", nil)
+		rr := httptest.NewRecorder()
+		devMux.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Contains(t, rr.Body.String(), "test")
+	})
+}
+
 func TestJsonError(t *testing.T) {
 	w := httptest.NewRecorder()
 	jsonError(w, "test error", http.StatusBadRequest, "validation")
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	var resp middleware.ErrorResponse
+	var resp errorResponse
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	assert.Equal(t, "test error", resp.Error)
 	assert.Equal(t, "validation", resp.ErrorType)

@@ -1,11 +1,19 @@
 package sse
 
 import (
-	"bytes"
 	"log"
+	"reflect"
 	"sync"
 	"time"
 )
+
+// RawEvent wraps pre-marshaled JSON bytes. fetchFn returns this so that
+// enrichFn can work with the raw JSON without re-parsing, and dedup can
+// compare the underlying bytes. Subscribers receive either a RawEvent
+// (normal data) or a map (degraded event).
+type RawEvent struct {
+	JSON []byte
+}
 
 // Broadcaster periodically fetches data and fans it out to all subscribers.
 // The background polling loop starts lazily on the first Subscribe() call.
@@ -18,9 +26,9 @@ import (
 // or Unsubscribe(). The mutex is only held during the fan-out phase.
 type Broadcaster struct {
 	mu          sync.Mutex
-	subscribers map[chan []byte]struct{}
-	fetchFn     func() ([]byte, error)
-	enrichFn    func(data, prev []byte, tickAt, prevAt time.Time) []byte
+	subscribers map[chan any]struct{}
+	fetchFn     func() (any, error)
+	enrichFn    func(data, prev any, tickAt, prevAt time.Time) any
 	interval    time.Duration
 	stopCh      chan struct{}
 	loopDone    chan struct{}
@@ -28,7 +36,7 @@ type Broadcaster struct {
 	idleTimer   *time.Timer
 
 	lastMu        sync.RWMutex
-	lastBroadcast []byte
+	lastBroadcast any
 }
 
 // broadcasterIdleTimeout is how long the polling loop stays alive after the
@@ -41,9 +49,9 @@ const broadcasterIdleTimeout = 10 * time.Second
 // timestamps (captured before the fetch), so it can derive additional
 // fields (e.g. BPS from cumulative counters) using the real elapsed time.
 // The loop starts on first Subscribe() — no need to call Start() manually.
-func NewBroadcaster(fetchFn func() ([]byte, error), enrichFn func(data, prev []byte, tickAt, prevAt time.Time) []byte, interval time.Duration) *Broadcaster {
+func NewBroadcaster(fetchFn func() (any, error), enrichFn func(data, prev any, tickAt, prevAt time.Time) any, interval time.Duration) *Broadcaster {
 	return &Broadcaster{
-		subscribers: make(map[chan []byte]struct{}),
+		subscribers: make(map[chan any]struct{}),
 		fetchFn:     fetchFn,
 		enrichFn:    enrichFn,
 		interval:    interval,
@@ -53,10 +61,25 @@ func NewBroadcaster(fetchFn func() ([]byte, error), enrichFn func(data, prev []b
 // LastBroadcast returns the most recent enriched broadcast payload.
 // Returns nil if no successful broadcast has occurred yet.
 // Safe for concurrent use.
-func (b *Broadcaster) LastBroadcast() []byte {
+func (b *Broadcaster) LastBroadcast() any {
 	b.lastMu.RLock()
 	defer b.lastMu.RUnlock()
 	return b.lastBroadcast
+}
+
+// LastBroadcastJSON returns the raw JSON bytes from the most recent broadcast.
+// Returns nil if no broadcast has occurred or the payload has no raw JSON.
+func (b *Broadcaster) LastBroadcastJSON() []byte {
+	b.lastMu.RLock()
+	defer b.lastMu.RUnlock()
+	switch v := b.lastBroadcast.(type) {
+	case RawEvent:
+		return v.JSON
+	case []byte:
+		return v
+	default:
+		return nil
+	}
 }
 
 // Stop shuts down the background loop (if running) and closes all subscriber channels.
@@ -89,14 +112,14 @@ func (b *Broadcaster) Stop() {
 	for ch := range b.subscribers {
 		close(ch)
 	}
-	b.subscribers = make(map[chan []byte]struct{})
+	b.subscribers = make(map[chan any]struct{})
 }
 
 // Subscribe returns a channel that receives broadcast payloads.
 // If this is the first subscriber and the loop is not running, the background
 // polling loop starts. Call Unsubscribe when done to clean up.
-func (b *Broadcaster) Subscribe() chan []byte {
-	ch := make(chan []byte, 1)
+func (b *Broadcaster) Subscribe() chan any {
+	ch := make(chan any, 1)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -124,7 +147,7 @@ func (b *Broadcaster) Subscribe() chan []byte {
 // Unsubscribe removes the subscriber. If this was the last subscriber,
 // the background polling loop is scheduled to stop after broadcasterIdleTimeout
 // to allow quick reconnection without restarting the polling goroutine.
-func (b *Broadcaster) Unsubscribe(ch chan []byte) {
+func (b *Broadcaster) Unsubscribe(ch chan any) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -152,7 +175,7 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
 
-	var lastSnapshot []byte
+	var lastSnapshot any
 	var lastAt time.Time
 	consecutiveErrors := 0
 
@@ -167,7 +190,7 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 				consecutiveErrors++
 				log.Printf("警告: 统计数据获取失败 (连续第%d次): %v", consecutiveErrors, err)
 				if consecutiveErrors == maxConsecutiveErrors {
-					degradedEvent := []byte(`{"degraded":true,"error":"数据源不可用"}`)
+					degradedEvent := map[string]any{"degraded": true, "error": "数据源不可用"}
 					b.mu.Lock()
 					for ch := range b.subscribers {
 						select {
@@ -184,7 +207,7 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 
 			// Dedup uses the raw snapshot so cumulative counters decide equality;
 			// derived fields (e.g. BPS) would otherwise defeat dedup.
-			if bytes.Equal(lastSnapshot, data) {
+			if reflect.DeepEqual(lastSnapshot, data) {
 				continue
 			}
 

@@ -130,3 +130,175 @@ func TestBasicAuthDisabled(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, "empty credentials should skip auth")
 }
+
+func TestBasicAuthSuccess(t *testing.T) {
+	resetAuthLimiter()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("protected"))
+	})
+	handler := BasicAuth("admin", "secret")(inner)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "protected", rr.Body.String())
+}
+
+func TestBasicAuthFailure(t *testing.T) {
+	resetAuthLimiter()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := BasicAuth("admin", "secret")(inner)
+
+	t.Run("Wrong password", func(t *testing.T) {
+		resetAuthLimiter()
+		req := httptest.NewRequest("GET", "/", nil)
+		req.SetBasicAuth("admin", "wrong")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		assert.Contains(t, rr.Header().Get("WWW-Authenticate"), "Basic")
+	})
+
+	t.Run("No credentials", func(t *testing.T) {
+		resetAuthLimiter()
+		req := httptest.NewRequest("GET", "/", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	})
+
+	t.Run("Blocked after too many failures", func(t *testing.T) {
+		resetAuthLimiter()
+		authLimiter.limit = 2
+
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.SetBasicAuth("admin", "wrong")
+			req.RemoteAddr = "10.0.0.99:1234"
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+		}
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req.SetBasicAuth("admin", "wrong")
+		req.RemoteAddr = "10.0.0.99:1234"
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+		assert.Equal(t, "300", rr.Header().Get("Retry-After"))
+	})
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := SecurityHeaders(inner)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
+	assert.Equal(t, "DENY", rr.Header().Get("X-Frame-Options"))
+	assert.Contains(t, rr.Header().Get("Content-Security-Policy"), "default-src 'self'")
+	assert.Equal(t, "strict-origin-when-cross-origin", rr.Header().Get("Referrer-Policy"))
+}
+
+func TestLogger(t *testing.T) {
+	t.Run("Logs request and sets status", func(t *testing.T) {
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte("ok"))
+		})
+		handler := Logger(false, inner)
+
+		req := httptest.NewRequest("GET", "/api/test", nil)
+		req.RemoteAddr = "1.2.3.4:5678"
+		rr := httptest.NewRecorder()
+
+		logOutput := captureLog(func() {
+			handler.ServeHTTP(rr, req)
+		})
+
+		assert.Equal(t, http.StatusCreated, rr.Code)
+		assert.Contains(t, logOutput, "1.2.3.4")
+		assert.Contains(t, logOutput, "GET")
+		assert.Contains(t, logOutput, "/api/test")
+		assert.Contains(t, logOutput, "201")
+	})
+
+	t.Run("GetClientIP from context", func(t *testing.T) {
+		var capturedIP string
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedIP = GetClientIP(r)
+			w.WriteHeader(http.StatusOK)
+		})
+		handler := Logger(true, inner)
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Header.Set("X-Real-IP", "10.0.0.5")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, "10.0.0.5", capturedIP)
+	})
+}
+
+func TestRateLimitTrustProxy(t *testing.T) {
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rl := &rateLimiter{
+		requests: make(map[string]slidingWindow),
+		limit:    3,
+		window:   time.Minute,
+	}
+	handler := rl.middleware(true, okHandler)
+
+	// Requests from same X-Real-IP should share the counter
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest("GET", "/api/test", nil)
+		req.Header.Set("X-Real-IP", "10.0.0.1")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+	}
+
+	// 4th request from same IP should be rate limited
+	req := httptest.NewRequest("GET", "/api/test", nil)
+	req.Header.Set("X-Real-IP", "10.0.0.1")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+
+	// Request from different IP should pass
+	req2 := httptest.NewRequest("GET", "/api/test", nil)
+	req2.Header.Set("X-Real-IP", "10.0.0.2")
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, req2)
+	assert.Equal(t, http.StatusOK, rr2.Code)
+}
+
+func TestStopCleanup(t *testing.T) {
+	startRateLimiterCleanup()
+	startAuthLimiterCleanup()
+
+	StopCleanup()
+
+	assert.Nil(t, limiterStop)
+	assert.Nil(t, authCleanupStop)
+
+	limiterStarted = false
+	authCleanupStarted = false
+}

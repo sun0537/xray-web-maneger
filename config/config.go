@@ -32,11 +32,19 @@ type AuthConfig struct {
 	Password string `yaml:"password"`
 }
 
+// LogConfig holds the xray log reading configuration.
+type LogConfig struct {
+	Type     string `yaml:"type"`      // "file", "journal", or "none"
+	FilePath string `yaml:"file_path"` // log file path (when type=file)
+	Journal  string `yaml:"journal"`   // systemd unit name (when type=journal)
+}
+
 // Config 配置文件结构
 type Config struct {
 	Server ServerConfig `yaml:"server"`
 	Xray   XrayConfig   `yaml:"xray"`
 	Auth   AuthConfig   `yaml:"auth"`
+	Log    LogConfig    `yaml:"log"`
 }
 
 // newDefaultConfig returns an immutable copy of the default configuration.
@@ -44,11 +52,14 @@ func newDefaultConfig() Config {
 	return Config{
 		Server: ServerConfig{
 			Host: "0.0.0.0",
-			Port: "8080",
+			Port: "9098",
 		},
 		Xray: XrayConfig{
 			ApiAddr:     "localhost:10085",
 			BalancerTag: "balancer",
+		},
+		Log: LogConfig{
+			Type: "none",
 		},
 	}
 }
@@ -105,6 +116,7 @@ func LoadConfig(filename string) (Config, error) {
 	applyDefault(&config.Server.Port, defaultCfg.Server.Port)
 	applyDefault(&config.Xray.ApiAddr, defaultCfg.Xray.ApiAddr)
 	applyDefault(&config.Xray.BalancerTag, defaultCfg.Xray.BalancerTag)
+	applyDefault(&config.Log.Type, defaultCfg.Log.Type)
 
 	if err := ValidateConfig(config); err != nil {
 		return newDefaultConfig(), fmt.Errorf("配置验证失败: %w", err)
@@ -161,6 +173,25 @@ func ValidateConfig(config Config) error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("无效的 Origin (需要 http(s)://host): %s", origin)
 		}
+	}
+
+	switch config.Log.Type {
+	case "none", "":
+	case "file":
+		if config.Log.FilePath == "" {
+			return fmt.Errorf("log.type 为 file 时, log.file_path 不能为空")
+		}
+	case "journal":
+		if config.Log.Journal == "" {
+			return fmt.Errorf("log.type 为 journal 时, log.journal 不能为空")
+		}
+		for _, c := range config.Log.Journal {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+				return fmt.Errorf("log.journal 包含非法字符: %c", c)
+			}
+		}
+	default:
+		return fmt.Errorf("log.type 必须是 file, journal 或 none, 得到: %s", config.Log.Type)
 	}
 
 	return nil

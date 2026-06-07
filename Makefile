@@ -6,11 +6,36 @@ ASSETS := config.yaml README.md
 RELEASE_DIR := release
 BUILD_TEMP_DIR := build_temp
 
-.PHONY: all build run test race frontend package clean
+.PHONY: all build run test race frontend package clean deps
 
 all: build
 
-build: frontend
+deps:
+	@echo "Checking build dependencies..."
+	@command -v go >/dev/null 2>&1 || { echo "ERROR: go not found, please install Go (https://go.dev/dl/)"; exit 1; }
+	@command -v node >/dev/null 2>&1 || { echo "ERROR: node not found, please install Node.js (https://nodejs.org/)"; exit 1; }
+	@command -v npm >/dev/null 2>&1 || { echo "ERROR: npm not found, please install Node.js"; exit 1; }
+	@pkg-config --exists libsystemd 2>/dev/null || { \
+		echo "libsystemd-dev not found, attempting to install..."; \
+		if command -v apt-get >/dev/null 2>&1; then \
+			sudo apt-get install -y libsystemd-dev; \
+		elif command -v dnf >/dev/null 2>&1; then \
+			sudo dnf install -y systemd-devel; \
+		elif command -v yum >/dev/null 2>&1; then \
+			sudo yum install -y systemd-devel; \
+		elif command -v pacman >/dev/null 2>&1; then \
+			sudo pacman -S --noconfirm systemd; \
+		else \
+			echo "ERROR: Cannot auto-install libsystemd-dev, please install manually:"; \
+			echo "  Debian/Ubuntu: sudo apt-get install libsystemd-dev"; \
+			echo "  Fedora/RHEL:   sudo dnf install systemd-devel"; \
+			echo "  Arch:          sudo pacman -S systemd"; \
+			exit 1; \
+		fi; \
+	}
+	@echo "All dependencies OK."
+
+build: deps frontend
 	@echo "Building for current OS/Arch..."
 	@mkdir -p bin/
 	go build $(LDFLAGS) -o bin/$(APP_NAME) .
@@ -50,7 +75,7 @@ $(RELEASE_DIR)/$(APP_NAME)-$(VERSION)-linux-%.tar.gz:
 	$(eval PKG_NAME := $(APP_NAME)-$(VERSION)-$(GOOS)-$(GOARCH))
 	$(eval STAGING_DIR := $(BUILD_TEMP_DIR)/$(PKG_NAME))
 	@mkdir -p $(STAGING_DIR)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(LDFLAGS) -o $(STAGING_DIR)/$(APP_NAME) .
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=1 go build $(LDFLAGS) -o $(STAGING_DIR)/$(APP_NAME) .
 	cp $(ASSETS) $(STAGING_DIR)/
 	chmod +x $(STAGING_DIR)/$(APP_NAME)
 	@if command -v upx >/dev/null 2>&1; then \
@@ -70,7 +95,7 @@ $(RELEASE_DIR)/$(APP_NAME)-$(VERSION)-windows-%.zip:
 	$(eval PKG_NAME := $(APP_NAME)-$(VERSION)-$(GOOS)-$(GOARCH))
 	$(eval STAGING_DIR := $(BUILD_TEMP_DIR)/$(PKG_NAME))
 	@mkdir -p $(STAGING_DIR)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(LDFLAGS) -o $(STAGING_DIR)/$(EXE_NAME) .
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 go build $(LDFLAGS) -o $(STAGING_DIR)/$(EXE_NAME) .
 	cp $(ASSETS) $(STAGING_DIR)/
 	@if command -v upx >/dev/null 2>&1; then \
 		echo "  -> 压缩 (UPX)..."; \
