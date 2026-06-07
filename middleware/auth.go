@@ -56,19 +56,25 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 	}
 }
 
+// maxTrackedAuthIPs caps the number of unique IPs tracked for auth failures,
+// preventing unbounded memory growth from distributed brute-force attacks.
+const maxTrackedAuthIPs = 10_000
+
 type simpleAuthRateLimit struct {
 	sync.Mutex
-	attempts    map[string]int
-	blockedAt   map[string]time.Time
-	limit       int
-	blockWindow time.Duration
+	attempts     map[string]int
+	lastAttempt  map[string]time.Time
+	blockedAt    map[string]time.Time
+	limit        int
+	blockWindow  time.Duration
 }
 
 var authLimiter = simpleAuthRateLimit{
-	attempts:    make(map[string]int),
-	blockedAt:   make(map[string]time.Time),
-	limit:       5,
-	blockWindow: 5 * time.Minute,
+	attempts:     make(map[string]int),
+	lastAttempt:  make(map[string]time.Time),
+	blockedAt:    make(map[string]time.Time),
+	limit:        5,
+	blockWindow:  5 * time.Minute,
 }
 
 func (a *simpleAuthRateLimit) isAuthBlocked(ip string) bool {
@@ -80,7 +86,8 @@ func (a *simpleAuthRateLimit) isAuthBlocked(ip string) bool {
 			return true
 		}
 		delete(a.blockedAt, ip)
-		a.attempts[ip] = 0
+		delete(a.attempts, ip)
+		delete(a.lastAttempt, ip)
 	}
 	return false
 }
@@ -89,7 +96,14 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 	a.Lock()
 	defer a.Unlock()
 
+	// If the IP is not already tracked and we've hit the cap, skip recording
+	// to prevent unbounded memory growth from distributed brute-force attacks.
+	if _, tracked := a.attempts[ip]; !tracked && len(a.attempts) >= maxTrackedAuthIPs {
+		return
+	}
+
 	a.attempts[ip]++
+	a.lastAttempt[ip] = time.Now()
 	if a.attempts[ip] >= a.limit {
 		a.blockedAt[ip] = time.Now()
 		log.Printf("安全: IP %s 因认证失败次数过多已被临时封锁 %v", ip, a.blockWindow)
@@ -123,12 +137,17 @@ func startAuthLimiterCleanup() {
 					if now.Sub(t) >= authLimiter.blockWindow {
 						delete(authLimiter.blockedAt, ip)
 						delete(authLimiter.attempts, ip)
+						delete(authLimiter.lastAttempt, ip)
 					}
 				}
 				for ip, count := range authLimiter.attempts {
 					if _, blocked := authLimiter.blockedAt[ip]; !blocked {
 						if count == 0 {
 							delete(authLimiter.attempts, ip)
+							delete(authLimiter.lastAttempt, ip)
+						} else if t, ok := authLimiter.lastAttempt[ip]; ok && now.Sub(t) >= authLimiter.blockWindow {
+							delete(authLimiter.attempts, ip)
+							delete(authLimiter.lastAttempt, ip)
 						}
 					}
 				}

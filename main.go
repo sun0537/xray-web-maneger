@@ -27,11 +27,13 @@ import (
 //go:embed frontend/index.html frontend/core.js frontend/network.js frontend/features.js frontend/style.css
 var frontendFS embed.FS
 
+const readyPollInterval = 200 * time.Millisecond
+
 // waitForReady polls the gRPC connection state until it reaches Ready,
 // TransientFailure, or the timeout expires. Returns true if Ready.
 func waitForReady(conn *grpc.ClientConn, timeout time.Duration) bool {
 	deadline := time.After(timeout)
-	poll := time.NewTicker(200 * time.Millisecond)
+	poll := time.NewTicker(readyPollInterval)
 	defer poll.Stop()
 	for {
 		select {

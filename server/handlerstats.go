@@ -89,7 +89,12 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 			}
 			stats = StatsData{Outbounds: []OutboundStatusData{}}
 		}
-		initialJSON, _ = json.Marshal(stats)
+		b, marshalErr := json.Marshal(stats)
+		if marshalErr != nil {
+			log.Printf("SSE 初始数据序列化失败: %v", marshalErr)
+		} else {
+			initialJSON = b
+		}
 	}
 	if initialJSON != nil {
 		fmt.Fprintf(w, "event: update\ndata: %s\n\n", initialJSON)
@@ -125,7 +130,12 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 			case []byte:
 				jsonData = v
 			default:
-				jsonData, _ = json.Marshal(v)
+				var marshalErr error
+				jsonData, marshalErr = json.Marshal(v)
+				if marshalErr != nil {
+					log.Printf("SSE 数据序列化失败: %v", marshalErr)
+					continue
+				}
 			}
 			if _, err := fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData); err != nil {
 				if connCtx.Err() == nil {

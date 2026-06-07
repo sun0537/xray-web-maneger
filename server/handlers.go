@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"xray-web-manager/middleware"
 )
 
 const apiTimeout = 5 * time.Second
@@ -39,17 +41,12 @@ func jsonResponse(w http.ResponseWriter, data any, statusCode int) {
 	}
 }
 
-// errorResponse is the standard JSON body for API error responses.
-// Defined locally to avoid a reverse dependency on the middleware package.
-type errorResponse struct {
-	Error     string `json:"error"`
-	ErrorType string `json:"error_type"`
-}
+
 
 func jsonError(w http.ResponseWriter, message string, statusCode int, errorType string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(errorResponse{Error: message, ErrorType: errorType}); err != nil {
+	if err := json.NewEncoder(w).Encode(middleware.ErrorResponse{Error: message, ErrorType: errorType}); err != nil {
 		log.Printf("JSON 错误响应写入失败: %v", err)
 	}
 }

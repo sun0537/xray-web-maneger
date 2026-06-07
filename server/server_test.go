@@ -11,8 +11,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc"
 
+	"xray-web-manager/internal/xray-proto/app/observatory"
+	observatorypb "xray-web-manager/internal/xray-proto/app/observatory/command"
 	"xray-web-manager/internal/xray-proto/common/serial"
+	"xray-web-manager/middleware"
 	"xray-web-manager/sse"
 )
 
@@ -168,10 +172,34 @@ func TestJsonError(t *testing.T) {
 	jsonError(w, "test error", http.StatusBadRequest, "validation")
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	var resp errorResponse
+	var resp middleware.ErrorResponse
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	assert.Equal(t, "test error", resp.Error)
 	assert.Equal(t, "validation", resp.ErrorType)
+}
+
+// MockObservatoryClientWithStatus returns sample outbound statuses.
+type MockObservatoryClientWithStatus struct{}
+
+func (m *MockObservatoryClientWithStatus) GetOutboundStatus(_ context.Context, _ *observatorypb.GetOutboundStatusRequest, _ ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	return &observatorypb.GetOutboundStatusResponse{
+		Status: &observatory.ObservationResult{
+			Status: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+				{OutboundTag: "node-2", Alive: true, Delay: 120},
+				{OutboundTag: "node-3", Alive: false, Delay: 0},
+			},
+		},
+	}, nil
+}
+
+// MockObservatoryClient returns empty statuses.
+type MockObservatoryClient struct{}
+
+func (m *MockObservatoryClient) GetOutboundStatus(_ context.Context, _ *observatorypb.GetOutboundStatusRequest, _ ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	return &observatorypb.GetOutboundStatusResponse{
+		Status: &observatory.ObservationResult{},
+	}, nil
 }
 
 func TestGetAllOutboundStatuses(t *testing.T) {

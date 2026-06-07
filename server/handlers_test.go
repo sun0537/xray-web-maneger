@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,58 +103,167 @@ func (m *MockStatsClient) GetUsersStats(ctx context.Context, in *statspb.GetUser
 	return nil, nil
 }
 
-type MockRoutingClient struct {
-	routingpb.UnimplementedRoutingServiceServer
+// mockRoutingClient implements routingpb.RoutingServiceClient with configurable responses.
+type mockRoutingClient struct {
+	balancerResp *routingpb.GetBalancerInfoResponse
+	balancerErr  error
+	overrideErr  error
 }
 
-func (m *MockRoutingClient) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
+func (m *mockRoutingClient) GetBalancerInfo(_ context.Context, _ *routingpb.GetBalancerInfoRequest, _ ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
+	if m.balancerErr != nil {
+		return nil, m.balancerErr
+	}
+	if m.balancerResp != nil {
+		return m.balancerResp, nil
+	}
+	return &routingpb.GetBalancerInfoResponse{Balancer: &routingpb.BalancerMsg{}}, nil
+}
+
+func (m *mockRoutingClient) OverrideBalancerTarget(_ context.Context, _ *routingpb.OverrideBalancerTargetRequest, _ ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
+	if m.overrideErr != nil {
+		return nil, m.overrideErr
+	}
+	return &routingpb.OverrideBalancerTargetResponse{}, nil
+}
+
+func (m *mockRoutingClient) SubscribeRoutingStats(_ context.Context, _ *routingpb.SubscribeRoutingStatsRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
 	return nil, nil
 }
-func (m *MockRoutingClient) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+func (m *mockRoutingClient) TestRoute(_ context.Context, _ *routingpb.TestRouteRequest, _ ...grpc.CallOption) (*routingpb.RoutingContext, error) {
 	return nil, nil
 }
-func (m *MockRoutingClient) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
-	return &routingpb.GetBalancerInfoResponse{
-		Balancer: &routingpb.BalancerMsg{},
-	}, nil
-}
-func (m *MockRoutingClient) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
+func (m *mockRoutingClient) AddRule(_ context.Context, _ *routingpb.AddRuleRequest, _ ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
 	return nil, nil
 }
-func (m *MockRoutingClient) AddRule(ctx context.Context, in *routingpb.AddRuleRequest, opts ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
+func (m *mockRoutingClient) RemoveRule(_ context.Context, _ *routingpb.RemoveRuleRequest, _ ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
 	return nil, nil
 }
-func (m *MockRoutingClient) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClient) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
+func (m *mockRoutingClient) ListRule(_ context.Context, _ *routingpb.ListRuleRequest, _ ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
 	return nil, nil
 }
 
-type MockObservatoryClient struct {
-	observatorypb.UnimplementedObservatoryServiceServer
+// MockRoutingClient returns a fixed balancer response with no override (auto mode).
+// --- Error-capable mocks for getCombinedStats tests ---
+
+type mockStatsClientWithError struct {
+	queryErr error
+	sysErr   error
 }
 
-func (m *MockObservatoryClient) GetOutboundStatus(ctx context.Context, in *observatorypb.GetOutboundStatusRequest, opts ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
-	return &observatorypb.GetOutboundStatusResponse{
-		Status: &observatory.ObservationResult{
-			Status: []*observatory.OutboundStatus{},
+func (m *mockStatsClientWithError) QueryStats(ctx context.Context, in *statspb.QueryStatsRequest, opts ...grpc.CallOption) (*statspb.QueryStatsResponse, error) {
+	if m.queryErr != nil {
+		return nil, m.queryErr
+	}
+	return &statspb.QueryStatsResponse{
+		Stat: []*statspb.Stat{
+			{Name: "inbound>>>test>>>traffic>>>uplink", Value: 1024},
+			{Name: "inbound>>>test>>>traffic>>>downlink", Value: 2048},
 		},
 	}, nil
 }
-
-type MockObservatoryClientWithStatus struct {
-	observatorypb.UnimplementedObservatoryServiceServer
+func (m *mockStatsClientWithError) GetSysStats(ctx context.Context, in *statspb.SysStatsRequest, opts ...grpc.CallOption) (*statspb.SysStatsResponse, error) {
+	if m.sysErr != nil {
+		return nil, m.sysErr
+	}
+	return &statspb.SysStatsResponse{Uptime: 100, Sys: 50000000, NumGoroutine: 10}, nil
+}
+func (m *mockStatsClientWithError) GetStats(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
+	return nil, nil
+}
+func (m *mockStatsClientWithError) GetStatsOnline(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
+	return nil, nil
+}
+func (m *mockStatsClientWithError) GetStatsOnlineIpList(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsOnlineIpListResponse, error) {
+	return nil, nil
+}
+func (m *mockStatsClientWithError) GetAllOnlineUsers(context.Context, *statspb.GetAllOnlineUsersRequest, ...grpc.CallOption) (*statspb.GetAllOnlineUsersResponse, error) {
+	return nil, nil
+}
+func (m *mockStatsClientWithError) GetUsersStats(context.Context, *statspb.GetUsersStatsRequest, ...grpc.CallOption) (*statspb.GetUsersStatsResponse, error) {
+	return nil, nil
 }
 
-func (m *MockObservatoryClientWithStatus) GetOutboundStatus(ctx context.Context, in *observatorypb.GetOutboundStatusRequest, opts ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+type mockObservatoryClientError struct{}
+
+func (m *mockObservatoryClientError) GetOutboundStatus(_ context.Context, _ *observatorypb.GetOutboundStatusRequest, _ ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	return nil, fmt.Errorf("observatory unavailable")
+}
+
+// ---
+
+type MockRoutingClient = mockRoutingClient
+
+// MockRoutingClientWithInfo returns a balancer response with an override set.
+type MockRoutingClientWithInfo struct {
+	override *routingpb.OverrideInfo
+}
+
+func (m *MockRoutingClientWithInfo) GetBalancerInfo(_ context.Context, _ *routingpb.GetBalancerInfoRequest, _ ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
+	return &routingpb.GetBalancerInfoResponse{
+		Balancer: &routingpb.BalancerMsg{Override: m.override},
+	}, nil
+}
+func (m *MockRoutingClientWithInfo) OverrideBalancerTarget(_ context.Context, _ *routingpb.OverrideBalancerTargetRequest, _ ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
+	return &routingpb.OverrideBalancerTargetResponse{}, nil
+}
+func (m *MockRoutingClientWithInfo) SubscribeRoutingStats(_ context.Context, _ *routingpb.SubscribeRoutingStatsRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) TestRoute(_ context.Context, _ *routingpb.TestRouteRequest, _ ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) AddRule(_ context.Context, _ *routingpb.AddRuleRequest, _ ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) RemoveRule(_ context.Context, _ *routingpb.RemoveRuleRequest, _ ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) ListRule(_ context.Context, _ *routingpb.ListRuleRequest, _ ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
+	return nil, nil
+}
+
+// MockRoutingClientError always returns an error from GetBalancerInfo.
+type MockRoutingClientError struct{}
+
+func (m *MockRoutingClientError) GetBalancerInfo(_ context.Context, _ *routingpb.GetBalancerInfoRequest, _ ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
+	return nil, fmt.Errorf("routing unavailable")
+}
+func (m *MockRoutingClientError) OverrideBalancerTarget(_ context.Context, _ *routingpb.OverrideBalancerTargetRequest, _ ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
+	return nil, fmt.Errorf("routing unavailable")
+}
+func (m *MockRoutingClientError) SubscribeRoutingStats(_ context.Context, _ *routingpb.SubscribeRoutingStatsRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) TestRoute(_ context.Context, _ *routingpb.TestRouteRequest, _ ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) AddRule(_ context.Context, _ *routingpb.AddRuleRequest, _ ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) RemoveRule(_ context.Context, _ *routingpb.RemoveRuleRequest, _ ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) ListRule(_ context.Context, _ *routingpb.ListRuleRequest, _ ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
+	return nil, nil
+}
+
+type mockObservatoryClient struct {
+	statuses []*observatory.OutboundStatus
+	err      error
+}
+
+func (m *mockObservatoryClient) GetOutboundStatus(_ context.Context, _ *observatorypb.GetOutboundStatusRequest, _ ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	statuses := m.statuses
+	if statuses == nil {
+		statuses = []*observatory.OutboundStatus{}
+	}
 	return &observatorypb.GetOutboundStatusResponse{
 		Status: &observatory.ObservationResult{
-			Status: []*observatory.OutboundStatus{
-				{OutboundTag: "node-1", Alive: true, Delay: 50},
-				{OutboundTag: "node-2", Alive: true, Delay: 120},
-				{OutboundTag: "node-3", Alive: false, Delay: 0},
-			},
+			Status: statuses,
 		},
 	}, nil
 }
@@ -195,7 +305,11 @@ func TestHandleGetOutbounds(t *testing.T) {
 func TestHandleGetOutboundsStatus(t *testing.T) {
 	s := &Server{
 		config:            config.Config{},
-		observatoryClient: &MockObservatoryClientWithStatus{},
+		observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+			{OutboundTag: "node-1", Alive: true, Delay: 50},
+			{OutboundTag: "node-2", Alive: true, Delay: 120},
+			{OutboundTag: "node-3", Alive: false, Delay: 0},
+		}},
 		startTime:         time.Time{},
 	}
 
@@ -243,8 +357,8 @@ func TestHandleStatsSSE(t *testing.T) {
 		statsClient:       &MockStatsClient{},
 		sseManager:        sseMgr,
 		handlerClient:     &MockHandlerClient{},
-		routingClient:     &MockRoutingClient{},
-		observatoryClient: &MockObservatoryClient{},
+		routingClient:     &mockRoutingClient{},
+		observatoryClient: &mockObservatoryClient{},
 		broadcaster:       broadcaster,
 		startTime:         time.Time{},
 	}
@@ -293,38 +407,13 @@ func TestHandleStatsSSE(t *testing.T) {
 	// produces at least one valid SSE frame — further frames are optional.
 }
 
-type MockRoutingClientSuccess struct {
-	routingpb.UnimplementedRoutingServiceServer
-}
-
-func (m *MockRoutingClientSuccess) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
-	return nil, nil
-}
-func (m *MockRoutingClientSuccess) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientSuccess) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
-	return &routingpb.OverrideBalancerTargetResponse{}, nil
-}
-func (m *MockRoutingClientSuccess) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientSuccess) AddRule(ctx context.Context, in *routingpb.AddRuleRequest, opts ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientSuccess) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientSuccess) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
-	return nil, nil
-}
 
 func TestHandleSwitchOutbound(t *testing.T) {
 	s := &Server{
 		config: config.Config{
 			Xray: config.XrayConfig{BalancerTag: "balancer"},
 		},
-		routingClient: &MockRoutingClientSuccess{},
+		routingClient: &mockRoutingClient{},
 	}
 
 	t.Run("Success", func(t *testing.T) {
@@ -459,40 +548,6 @@ func TestHandleGetCurrentOutbound(t *testing.T) {
 	})
 }
 
-type MockRoutingClientWithInfo struct {
-	routingpb.UnimplementedRoutingServiceServer
-	override *routingpb.OverrideInfo
-}
-
-func (m *MockRoutingClientWithInfo) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
-	resp := &routingpb.GetBalancerInfoResponse{}
-	if m.override != nil {
-		resp.Balancer = &routingpb.BalancerMsg{Override: m.override}
-	} else {
-		resp.Balancer = &routingpb.BalancerMsg{}
-	}
-	return resp, nil
-}
-
-func (m *MockRoutingClientWithInfo) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
-	return &routingpb.OverrideBalancerTargetResponse{}, nil
-}
-
-func (m *MockRoutingClientWithInfo) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) AddRule(ctx context.Context, in *routingpb.AddRuleRequest, opts ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
-	return nil, nil
-}
 
 func TestHandleGetCurrentOutboundWithOverride(t *testing.T) {
 	t.Run("Returns current tag when override set", func(t *testing.T) {
@@ -551,28 +606,84 @@ func TestHandleGetCurrentOutboundWithOverride(t *testing.T) {
 	})
 }
 
-type MockRoutingClientError struct {
-	routingpb.UnimplementedRoutingServiceServer
+func TestGetCombinedStats(t *testing.T) {
+	t.Run("All sources succeed", func(t *testing.T) {
+		s := &Server{
+			statsClient:       &MockStatsClient{},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+			}},
+		}
+		stats, err := s.getCombinedStats(context.Background())
+		assert.NoError(t, err)
+		assert.Equal(t, int64(1024), stats.Uplink)
+		assert.Equal(t, int64(2048), stats.Downlink)
+		assert.Equal(t, int64(100), stats.Uptime)
+		assert.Equal(t, uint64(50000000), stats.SysMem)
+		assert.Equal(t, 10, stats.Goroutines)
+		assert.Len(t, stats.Outbounds, 1)
+		assert.False(t, stats.Degraded)
+	})
+
+	t.Run("QueryStats fails — degraded", func(t *testing.T) {
+		s := &Server{
+			statsClient:       &mockStatsClientWithError{queryErr: fmt.Errorf("stats unavailable")},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+			}},
+		}
+		stats, err := s.getCombinedStats(context.Background())
+		assert.NoError(t, err)
+		assert.True(t, stats.Degraded)
+		assert.Equal(t, int64(0), stats.Uplink)
+		assert.Equal(t, int64(100), stats.Uptime)
+	})
+
+	t.Run("GetSysStats fails — degraded", func(t *testing.T) {
+		s := &Server{
+			statsClient:       &mockStatsClientWithError{sysErr: fmt.Errorf("sys unavailable")},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+			}},
+		}
+		stats, err := s.getCombinedStats(context.Background())
+		assert.NoError(t, err)
+		assert.True(t, stats.Degraded)
+		assert.Equal(t, int64(1024), stats.Uplink)
+		assert.Equal(t, int64(0), stats.Uptime)
+	})
+
+	t.Run("Observatory fails — outbounds nil", func(t *testing.T) {
+		s := &Server{
+			statsClient:       &MockStatsClient{},
+			observatoryClient: &mockObservatoryClientError{},
+		}
+		stats, err := s.getCombinedStats(context.Background())
+		assert.NoError(t, err)
+		assert.Equal(t, int64(1024), stats.Uplink)
+		assert.Nil(t, stats.Outbounds)
+	})
+
+	t.Run("All sources fail — returns error", func(t *testing.T) {
+		s := &Server{
+			statsClient:       &mockStatsClientWithError{queryErr: fmt.Errorf("q"), sysErr: fmt.Errorf("s")},
+			observatoryClient: &mockObservatoryClientError{},
+		}
+		_, err := s.getCombinedStats(context.Background())
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "all data sources failed")
+	})
+
+	t.Run("Context cancelled — returns early", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		s := &Server{
+			statsClient:       &MockStatsClient{},
+			observatoryClient: &mockObservatoryClient{},
+		}
+		// With fast mocks, the goroutines may complete before the context
+		// deadline is checked, so we just verify no panic occurs.
+		s.getCombinedStats(ctx)
+	})
 }
 
-func (m *MockRoutingClientError) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
-	return nil, assert.AnError
-}
-func (m *MockRoutingClientError) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) AddRule(ctx context.Context, in *routingpb.AddRuleRequest, opts ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
-	return nil, nil
-}

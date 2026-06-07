@@ -1,8 +1,8 @@
 package sse
 
 import (
+	"bytes"
 	"log"
-	"reflect"
 	"sync"
 	"time"
 )
@@ -34,6 +34,7 @@ type Broadcaster struct {
 	loopDone    chan struct{}
 	stopped     bool
 	idleTimer   *time.Timer
+	warnOnce    sync.Once
 
 	lastMu        sync.RWMutex
 	lastBroadcast any
@@ -205,10 +206,31 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 
 			consecutiveErrors = 0
 
+			// Defensive type assertion at the fetch entry point.
+			// The stats publisher emits RawEvent; any other type bypasses
+			// dedup silently. Warn once per Broadcaster so developers
+			// notice the mismatch without being flooded in logs.
+			if _, ok := data.(RawEvent); !ok {
+				b.warnOnce.Do(func() {
+					log.Printf("警告: Broadcaster fetchFn 返回非 RawEvent 类型 %T，去重将被跳过", data)
+				})
+			}
+
 			// Dedup uses the raw snapshot so cumulative counters decide equality;
 			// derived fields (e.g. BPS) would otherwise defeat dedup.
-			if reflect.DeepEqual(lastSnapshot, data) {
-				continue
+			//
+			// Dedup is scoped to RawEvent (byte-level JSON comparison) because
+			// that is what the stats publisher emits. Non-RawEvent values bypass
+			// dedup and are broadcast unconditionally — if a new payload type
+			// is introduced and dedup is desired, it must be handled here.
+			if lastSnapshot != nil {
+				if curr, ok := data.(RawEvent); ok {
+					if prev, ok := lastSnapshot.(RawEvent); ok {
+						if bytes.Equal(curr.JSON, prev.JSON) {
+							continue
+						}
+					}
+				}
 			}
 
 			broadcast := data
