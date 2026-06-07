@@ -257,7 +257,7 @@ func TestHandleGetLogs(t *testing.T) {
 func TestReadJournalLogStub(t *testing.T) {
 	// On non-Linux platforms, readJournalLog returns an error.
 	// On Linux, this test still works but exercises the real implementation.
-	lines, err := readJournalLog(context.Background(), "test-unit", 100, "")
+	lines, err := readJournalLog(context.Background(), "test-unit", 100, "", 1024)
 	if err != nil {
 		assert.Nil(t, lines)
 		assert.Contains(t, err.Error(), "journal")
@@ -275,10 +275,10 @@ func TestFileTooLargeError(t *testing.T) {
 
 func TestTruncateSearch(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      string
-		max     int
-		want    string
+		name string
+		in   string
+		max  int
+		want string
 	}{
 		{"no truncation short", "hello", 10, "hello"},
 		{"no truncation exact", "hello", 5, "hello"},

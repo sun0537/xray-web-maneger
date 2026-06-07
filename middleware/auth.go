@@ -19,16 +19,17 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := GetClientIP(r)
+			ip := ClientIPFromContext(r)
 
 			if authLimiter.isAuthBlocked(ip) {
 				w.Header().Set("Retry-After", "300")
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(ErrorResponse{
+				body, _ := json.Marshal(ErrorResponse{
 					Error:     "认证失败次数过多，请 5 分钟后再试",
 					ErrorType: "auth_rate_limit",
 				})
+				_, _ = w.Write(body)
 				return
 			}
 
@@ -45,9 +46,9 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 					ErrorType: "auth",
 				})
 				if err != nil {
-					w.Write([]byte(`{"error":"未授权 (Unauthorized)","error_type":"auth"}`))
+					_, _ = w.Write([]byte(`{"error":"未授权 (Unauthorized)","error_type":"auth"}`))
 				} else {
-					w.Write(body)
+					_, _ = w.Write(body)
 				}
 				return
 			}
@@ -60,34 +61,45 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 // preventing unbounded memory growth from distributed brute-force attacks.
 const maxTrackedAuthIPs = 10_000
 
+// authState tracks the auth-failure state for a single IP. Embedding both
+// timestamps in a single value lets the limiter use one map instead of three,
+// reducing memory and keeping related state co-located.
+type authState struct {
+	attempts    int
+	lastAttempt time.Time
+	blockedAt   time.Time
+}
+
 type simpleAuthRateLimit struct {
 	sync.Mutex
-	attempts     map[string]int
-	lastAttempt  map[string]time.Time
-	blockedAt    map[string]time.Time
-	limit        int
-	blockWindow  time.Duration
+	// states uses pointer values so mutations propagate without an explicit
+	// write-back. This matches ratelimit.go's map[string]*slidingWindow and
+	// removes the value-semantic trap where forgetting to write back would
+	// silently drop the increment.
+	states      map[string]*authState
+	limit       int
+	blockWindow time.Duration
 }
 
 var authLimiter = simpleAuthRateLimit{
-	attempts:     make(map[string]int),
-	lastAttempt:  make(map[string]time.Time),
-	blockedAt:    make(map[string]time.Time),
-	limit:        5,
-	blockWindow:  5 * time.Minute,
+	states:      make(map[string]*authState),
+	limit:       5,
+	blockWindow: 5 * time.Minute,
 }
 
 func (a *simpleAuthRateLimit) isAuthBlocked(ip string) bool {
 	a.Lock()
 	defer a.Unlock()
 
-	if blocked, ok := a.blockedAt[ip]; ok {
-		if time.Since(blocked) < a.blockWindow {
-			return true
-		}
-		delete(a.blockedAt, ip)
-		delete(a.attempts, ip)
-		delete(a.lastAttempt, ip)
+	st, ok := a.states[ip]
+	if !ok {
+		return false
+	}
+	if !st.blockedAt.IsZero() && time.Since(st.blockedAt) < a.blockWindow {
+		return true
+	}
+	if !st.blockedAt.IsZero() {
+		delete(a.states, ip)
 	}
 	return false
 }
@@ -96,16 +108,19 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 	a.Lock()
 	defer a.Unlock()
 
-	// If the IP is not already tracked and we've hit the cap, skip recording
-	// to prevent unbounded memory growth from distributed brute-force attacks.
-	if _, tracked := a.attempts[ip]; !tracked && len(a.attempts) >= maxTrackedAuthIPs {
-		return
+	st, tracked := a.states[ip]
+	if !tracked {
+		if len(a.states) >= maxTrackedAuthIPs {
+			return
+		}
+		st = &authState{}
+		a.states[ip] = st
 	}
 
-	a.attempts[ip]++
-	a.lastAttempt[ip] = time.Now()
-	if a.attempts[ip] >= a.limit {
-		a.blockedAt[ip] = time.Now()
+	st.attempts++
+	st.lastAttempt = time.Now()
+	if st.attempts >= a.limit && st.blockedAt.IsZero() {
+		st.blockedAt = time.Now()
 		log.Printf("安全: IP %s 因认证失败次数过多已被临时封锁 %v", ip, a.blockWindow)
 	}
 }
@@ -133,22 +148,13 @@ func startAuthLimiterCleanup() {
 			case <-ticker.C:
 				authLimiter.Lock()
 				now := time.Now()
-				for ip, t := range authLimiter.blockedAt {
-					if now.Sub(t) >= authLimiter.blockWindow {
-						delete(authLimiter.blockedAt, ip)
-						delete(authLimiter.attempts, ip)
-						delete(authLimiter.lastAttempt, ip)
+				for ip, st := range authLimiter.states {
+					if !st.blockedAt.IsZero() && now.Sub(st.blockedAt) >= authLimiter.blockWindow {
+						delete(authLimiter.states, ip)
+						continue
 					}
-				}
-				for ip, count := range authLimiter.attempts {
-					if _, blocked := authLimiter.blockedAt[ip]; !blocked {
-						if count == 0 {
-							delete(authLimiter.attempts, ip)
-							delete(authLimiter.lastAttempt, ip)
-						} else if t, ok := authLimiter.lastAttempt[ip]; ok && now.Sub(t) >= authLimiter.blockWindow {
-							delete(authLimiter.attempts, ip)
-							delete(authLimiter.lastAttempt, ip)
-						}
+					if st.blockedAt.IsZero() && now.Sub(st.lastAttempt) >= authLimiter.blockWindow {
+						delete(authLimiter.states, ip)
 					}
 				}
 				authLimiter.Unlock()

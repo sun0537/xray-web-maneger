@@ -2,13 +2,12 @@ package server
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
 	statspb "xray-web-manager/internal/xray-proto/app/stats/command"
 )
-
-const grpcTimeout = 4 * time.Second
 
 type cachedHealth struct {
 	status    string
@@ -31,7 +30,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 
 	xrayStatus := cached.status
 	if time.Since(cached.timestamp) > 10*time.Second {
-		result, err, _ := s.healthGroup.Do("xray-health", func() (interface{}, error) {
+		result, err, _ := s.healthGroup.Do(healthGroupKey, func() (interface{}, error) {
 			s.healthMu.RLock()
 			fresh := s.healthCache
 			s.healthMu.RUnlock()
@@ -39,7 +38,11 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 				return fresh.status, nil
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			// Use a context independent of any specific request so the gRPC call
+			// survives even if the request that triggered singleflight.Do
+			// disconnects. Otherwise a slow or disconnected first caller
+			// would cancel the coalesced probe and poison all waiters.
+			ctx, cancel := context.WithTimeout(s.backgroundContext(), 2*time.Second)
 			defer cancel()
 			if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
 				return "disconnected", err
@@ -50,6 +53,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 			xrayStatus = status
 			cacheTime := time.Now()
 			if err != nil {
+				log.Printf("健康检查: Xray gRPC 不可达: %v", err)
 				cacheTime = cacheTime.Add(-7 * time.Second)
 			}
 			s.healthMu.Lock()

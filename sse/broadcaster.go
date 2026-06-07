@@ -2,6 +2,7 @@ package sse
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -34,7 +35,7 @@ type Broadcaster struct {
 	loopDone    chan struct{}
 	stopped     bool
 	idleTimer   *time.Timer
-	warnOnce    sync.Once
+	stopOnce    sync.Once
 
 	lastMu        sync.RWMutex
 	lastBroadcast any
@@ -68,52 +69,37 @@ func (b *Broadcaster) LastBroadcast() any {
 	return b.lastBroadcast
 }
 
-// LastBroadcastJSON returns the raw JSON bytes from the most recent broadcast.
-// Returns nil if no broadcast has occurred or the payload has no raw JSON.
-func (b *Broadcaster) LastBroadcastJSON() []byte {
-	b.lastMu.RLock()
-	defer b.lastMu.RUnlock()
-	switch v := b.lastBroadcast.(type) {
-	case RawEvent:
-		return v.JSON
-	case []byte:
-		return v
-	default:
-		return nil
-	}
-}
+
 
 // Stop shuts down the background loop (if running) and closes all subscriber channels.
 func (b *Broadcaster) Stop() {
-	b.mu.Lock()
-	if b.stopped {
+	b.stopOnce.Do(func() {
+		b.mu.Lock()
+		b.stopped = true
+		if b.idleTimer != nil {
+			b.idleTimer.Stop()
+			b.idleTimer = nil
+		}
+		if b.stopCh != nil {
+			close(b.stopCh)
+			b.stopCh = nil
+		}
+		loopDone := b.loopDone
 		b.mu.Unlock()
-		return
-	}
-	b.stopped = true
-	if b.idleTimer != nil {
-		b.idleTimer.Stop()
-		b.idleTimer = nil
-	}
-	if b.stopCh != nil {
-		close(b.stopCh)
-		b.stopCh = nil
-	}
-	loopDone := b.loopDone
-	b.mu.Unlock()
 
-	// Wait for the loop goroutine to fully exit before closing channels,
-	// preventing a send-on-closed-channel panic.
-	if loopDone != nil {
-		<-loopDone
-	}
+		// Wait for the loop goroutine to fully exit before closing channels,
+		// preventing a send-on-closed-channel panic.
+		if loopDone != nil {
+			<-loopDone
+		}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for ch := range b.subscribers {
-		close(ch)
-	}
-	b.subscribers = make(map[chan any]struct{})
+		b.mu.Lock()
+		for ch := range b.subscribers {
+			close(ch)
+		}
+		b.subscribers = make(map[chan any]struct{})
+		b.mu.Unlock()
+	})
 }
 
 // Subscribe returns a channel that receives broadcast payloads.
@@ -145,13 +131,13 @@ func (b *Broadcaster) Subscribe() chan any {
 	return ch
 }
 
-// Unsubscribe removes the subscriber. If this was the last subscriber,
-// the background polling loop is scheduled to stop after broadcasterIdleTimeout
-// to allow quick reconnection without restarting the polling goroutine.
+// Unsubscribe removes the subscriber. Idempotent: calling it multiple times
+// for the same channel is safe. Channel closing is handled exclusively by
+// Stop() to keep lifecycle management in one place; consumers should rely on
+// their own context (e.g. request context) for cancellation.
 func (b *Broadcaster) Unsubscribe(ch chan any) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
 	delete(b.subscribers, ch)
 	if len(b.subscribers) == 0 && b.stopCh != nil && b.idleTimer == nil {
 		b.idleTimer = time.AfterFunc(broadcasterIdleTimeout, func() {
@@ -206,29 +192,25 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 
 			consecutiveErrors = 0
 
-			// Defensive type assertion at the fetch entry point.
-			// The stats publisher emits RawEvent; any other type bypasses
-			// dedup silently. Warn once per Broadcaster so developers
-			// notice the mismatch without being flooded in logs.
-			if _, ok := data.(RawEvent); !ok {
-				b.warnOnce.Do(func() {
-					log.Printf("警告: Broadcaster fetchFn 返回非 RawEvent 类型 %T，去重将被跳过", data)
-				})
-			}
-
-			// Dedup uses the raw snapshot so cumulative counters decide equality;
-			// derived fields (e.g. BPS) would otherwise defeat dedup.
-			//
-			// Dedup is scoped to RawEvent (byte-level JSON comparison) because
-			// that is what the stats publisher emits. Non-RawEvent values bypass
-			// dedup and are broadcast unconditionally — if a new payload type
-			// is introduced and dedup is desired, it must be handled here.
+			// Dedup is scoped to RawEvent (byte-level JSON comparison) for the
+			// hot stats path, and falls back to json.Marshal for arbitrary
+			// payload types so dedup remains correct for non-RawEvent sources.
+			// We also fall back when only one side is RawEvent, because Go's
+			// type system allows fetchFn to switch payload types across ticks
+			// (defensive: the assumption is that fetchFn returns a stable
+			// type, but we don't want dedup to silently disappear on a switch).
 			if lastSnapshot != nil {
-				if curr, ok := data.(RawEvent); ok {
-					if prev, ok := lastSnapshot.(RawEvent); ok {
-						if bytes.Equal(curr.JSON, prev.JSON) {
-							continue
-						}
+				currRaw, currIsRaw := data.(RawEvent)
+				prevRaw, prevIsRaw := lastSnapshot.(RawEvent)
+				if currIsRaw && prevIsRaw {
+					if bytes.Equal(currRaw.JSON, prevRaw.JSON) {
+						continue
+					}
+				} else {
+					currJSON, err1 := json.Marshal(data)
+					prevJSON, err2 := json.Marshal(lastSnapshot)
+					if err1 == nil && err2 == nil && bytes.Equal(currJSON, prevJSON) {
+						continue
 					}
 				}
 			}

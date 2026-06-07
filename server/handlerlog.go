@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,11 +16,11 @@ import (
 )
 
 const (
-	logDefaultLines   = 500
-	logMaxLines       = 2000
-	logMaxFileSize    = 10 * 1024 * 1024
-	logTimeout        = 10 * time.Second
-	maxSearchLength   = 256
+	logDefaultLines = 500
+	logMaxLines     = 2000
+	logMaxFileSize  = 10 * 1024 * 1024
+	logTimeout      = 10 * time.Second
+	maxSearchLength = 256
 )
 
 // truncateSearch caps the byte length of a user-supplied search string and
@@ -83,14 +84,14 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	case "file":
 		lines, err = readLogFile(ctx, cfg.FilePath, maxLines, search)
 	case "journal":
-		lines, err = readJournalLog(ctx, cfg.Journal, maxLines, search)
+		lines, err = readJournalLog(ctx, cfg.Journal, maxLines, search, s.config.Log.MaxBytes)
 	default:
 		jsonError(w, "不支持的日志类型: "+cfg.Type, http.StatusBadRequest, "validation")
 		return
 	}
 
 	if err != nil {
-		log.Printf("读取日志失败 [来源: %s, 请求来源: %s]: %v", cfg.Type, middleware.GetClientIP(r), err)
+		log.Printf("读取日志失败 [来源: %s, 请求来源: %s]: %v", cfg.Type, middleware.ClientIPFromContext(r), err)
 		jsonError(w, "读取日志失败: "+err.Error(), http.StatusInternalServerError, "log_read")
 		return
 	}
@@ -129,7 +130,8 @@ func readLogFile(ctx context.Context, filePath string, maxLines int, search stri
 	count := 0
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	// Use a smaller initial buffer to reduce allocation for small files.
+	scanner.Buffer(make([]byte, 0, 4*1024), 256*1024)
 
 	searchLower := strings.ToLower(search)
 	for scanner.Scan() {
@@ -147,7 +149,7 @@ func readLogFile(ctx context.Context, filePath string, maxLines int, search stri
 		count++
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("扫描日志文件 %s 失败: %w", filePath, err)
 	}
 
 	// Fewer lines than capacity — return the filled portion in order.

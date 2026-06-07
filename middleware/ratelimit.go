@@ -15,14 +15,14 @@ type slidingWindow struct {
 
 type rateLimiter struct {
 	sync.Mutex
-	requests     map[string]slidingWindow
+	requests     map[string]*slidingWindow
 	limit        int
 	window       time.Duration
 	cleanupCount int
 }
 
 var limiter = rateLimiter{
-	requests: make(map[string]slidingWindow),
+	requests: make(map[string]*slidingWindow),
 	limit:    100,
 	window:   time.Minute,
 }
@@ -93,7 +93,7 @@ func (rl *rateLimiter) middleware(trustProxy bool, next http.Handler) http.Handl
 				Error:     "请求过于频繁，请稍后再试",
 				ErrorType: "rate_limit",
 			})
-			w.Write(body)
+			_, _ = w.Write(body)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -108,14 +108,16 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	sw, exists := rl.requests[ip]
 
 	if !exists {
-		rl.requests[ip] = slidingWindow{currCount: 1, windowStart: now}
+		rl.requests[ip] = &slidingWindow{currCount: 1, windowStart: now}
 		return true
 	}
 
 	elapsed := now.Sub(sw.windowStart)
 
 	if elapsed > rl.window*2 {
-		rl.requests[ip] = slidingWindow{currCount: 1, windowStart: now}
+		sw.currCount = 1
+		sw.prevCount = 0
+		sw.windowStart = now
 		return true
 	}
 
@@ -130,12 +132,10 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	effective := float64(sw.prevCount)*overlap + float64(sw.currCount)
 
 	if effective >= float64(rl.limit) {
-		rl.requests[ip] = sw
 		return false
 	}
 
 	sw.currCount++
-	rl.requests[ip] = sw
 
 	rl.cleanupCount++
 	if rl.cleanupCount >= 100 {

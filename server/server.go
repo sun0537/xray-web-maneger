@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -54,15 +53,7 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 	}
 
 	s.broadcaster = sse.NewBroadcaster(func() (any, error) {
-		stats, err := s.getCombinedStats(s.shutdownCtx)
-		if err != nil {
-			return nil, err
-		}
-		b, err := json.Marshal(stats)
-		if err != nil {
-			return nil, err
-		}
-		return sse.RawEvent{JSON: b}, nil
+		return s.getCombinedStats(s.shutdownCtx)
 	}, computeBPS, sseUpdateInterval)
 
 	return s
@@ -91,8 +82,24 @@ func (s *Server) Shutdown() {
 	s.sseManager.CloseAll()
 }
 
-const reconnectMonitorInterval = 5 * time.Second
-const reconnectRecoveryTimeout = 10 * time.Second
+// backgroundContext returns a context that is independent of any single
+// request. It is the safe base for long-running gRPC operations that must
+// survive across multiple coalesced callers (e.g. singleflight). Falls back
+// to context.Background() when the server was not constructed via NewServer
+// (e.g. in tests that build a *Server literal directly).
+func (s *Server) backgroundContext() context.Context {
+	if s.shutdownCtx != nil {
+		return s.shutdownCtx
+	}
+	return context.Background()
+}
+
+const (
+	grpcTimeout              = 4 * time.Second
+	reconnectMonitorInterval = 5 * time.Second
+	reconnectRecoveryTimeout = 10 * time.Second
+	healthGroupKey           = "xray-health"
+)
 
 // StartReconnectMonitor monitors gRPC connection state and reconnects on failure.
 func (s *Server) StartReconnectMonitor(conn *grpc.ClientConn) {

@@ -41,12 +41,15 @@ func jsonResponse(w http.ResponseWriter, data any, statusCode int) {
 	}
 }
 
-
-
 func jsonError(w http.ResponseWriter, message string, statusCode int, errorType string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(middleware.ErrorResponse{Error: message, ErrorType: errorType}); err != nil {
+	body, err := json.Marshal(middleware.ErrorResponse{Error: message, ErrorType: errorType})
+	if err != nil {
+		log.Printf("JSON 错误响应序列化失败: %v", err)
+		body = []byte(`{"error":"internal error","error_type":"server"}`)
+	}
+	if _, err := w.Write(body); err != nil {
 		log.Printf("JSON 错误响应写入失败: %v", err)
 	}
 }
