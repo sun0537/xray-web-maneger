@@ -111,7 +111,7 @@ func TestValidateConfig(t *testing.T) {
 func TestNewDefaultConfig(t *testing.T) {
 	cfg := newDefaultConfig()
 	assert.Equal(t, "0.0.0.0", cfg.Server.Host)
-	assert.Equal(t, "8080", cfg.Server.Port)
+	assert.Equal(t, "9098", cfg.Server.Port)
 	assert.Equal(t, "localhost:10085", cfg.Xray.ApiAddr)
 	assert.Equal(t, "balancer", cfg.Xray.BalancerTag)
 }
@@ -153,6 +153,145 @@ func TestGetConfigPath(t *testing.T) {
 		path, err := GetConfigPath("")
 		assert.NoError(t, err)
 		assert.Contains(t, path, "config.yaml")
+	})
+}
+
+func TestLoadConfig(t *testing.T) {
+	t.Run("Valid config file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "config.yaml")
+		content := `
+server:
+  host: "127.0.0.1"
+  port: "9999"
+xray:
+  api_addr: "localhost:10085"
+  balancer_tag: "balancer"
+log:
+  type: "none"
+`
+		os.WriteFile(path, []byte(content), 0644)
+
+		cfg, err := LoadConfig(path)
+		assert.NoError(t, err)
+		assert.Equal(t, "127.0.0.1", cfg.Server.Host)
+		assert.Equal(t, "9999", cfg.Server.Port)
+	})
+
+	t.Run("Missing file returns defaults", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "missing.yaml")
+
+		cfg, err := LoadConfig(path)
+		assert.NoError(t, err)
+		assert.Equal(t, "0.0.0.0", cfg.Server.Host)
+		assert.Equal(t, "9098", cfg.Server.Port)
+		assert.Equal(t, "localhost:10085", cfg.Xray.ApiAddr)
+	})
+
+	t.Run("Invalid YAML returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "bad.yaml")
+		os.WriteFile(path, []byte("{invalid: [yaml"), 0644)
+
+		_, err := LoadConfig(path)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "解析配置文件失败")
+	})
+
+	t.Run("Empty fields get defaults", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "config.yaml")
+		os.WriteFile(path, []byte("server:\n  host: \"\"\nxray:\n  api_addr: \"localhost:10085\"\n  balancer_tag: \"b\"\n"), 0644)
+
+		cfg, err := LoadConfig(path)
+		assert.NoError(t, err)
+		assert.Equal(t, "0.0.0.0", cfg.Server.Host)
+		assert.Equal(t, "9098", cfg.Server.Port)
+	})
+
+	t.Run("Log config file type", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := filepath.Join(tmpDir, "config.yaml")
+		content := `
+server:
+  port: "9098"
+xray:
+  api_addr: "localhost:10085"
+  balancer_tag: "balancer"
+log:
+  type: "file"
+  file_path: "/var/log/xray.log"
+`
+		os.WriteFile(path, []byte(content), 0644)
+
+		cfg, err := LoadConfig(path)
+		assert.NoError(t, err)
+		assert.Equal(t, "file", cfg.Log.Type)
+		assert.Equal(t, "/var/log/xray.log", cfg.Log.FilePath)
+	})
+}
+
+func TestValidateConfigLog(t *testing.T) {
+	validBase := func() Config {
+		return Config{
+			Server: ServerConfig{Host: "localhost", Port: "8080"},
+			Xray:   XrayConfig{ApiAddr: "localhost:10085", BalancerTag: "balancer"},
+		}
+	}
+
+	t.Run("Log type none is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "none"}
+		assert.NoError(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Log type empty is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: ""}
+		assert.NoError(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Log type file valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "file", FilePath: "/var/log/xray.log"}
+		assert.NoError(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Log type file missing path", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "file", FilePath: ""}
+		assert.Error(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Log type journal valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "journal", Journal: "xray"}
+		assert.NoError(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Log type journal missing name", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "journal", Journal: ""}
+		assert.Error(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Log type journal invalid chars", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "journal", Journal: "xray service"}
+		assert.Error(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Log type journal with dots and dashes", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "journal", Journal: "xray-v2.service"}
+		assert.NoError(t, ValidateConfig(cfg))
+	})
+
+	t.Run("Invalid log type", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Log = LogConfig{Type: "syslog"}
+		assert.Error(t, ValidateConfig(cfg))
 	})
 }
 

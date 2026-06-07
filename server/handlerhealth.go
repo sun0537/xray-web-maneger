@@ -1,0 +1,74 @@
+package server
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	statspb "xray-web-manager/internal/xray-proto/app/stats/command"
+)
+
+const grpcTimeout = 4 * time.Second
+
+type cachedHealth struct {
+	status    string
+	timestamp time.Time
+}
+
+type HealthStatus struct {
+	Status         string `json:"status"`
+	XrayAPIStatus  string `json:"xray_api_status"`
+	SSEConnections int    `json:"sse_connections"`
+	Uptime         int64  `json:"uptime"`
+	BalancerTag    string `json:"balancer_tag"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
+func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	s.healthMu.RLock()
+	cached := s.healthCache
+	s.healthMu.RUnlock()
+
+	xrayStatus := cached.status
+	if time.Since(cached.timestamp) > 10*time.Second {
+		result, err, _ := s.healthGroup.Do("xray-health", func() (interface{}, error) {
+			s.healthMu.RLock()
+			fresh := s.healthCache
+			s.healthMu.RUnlock()
+			if time.Since(fresh.timestamp) <= 10*time.Second {
+				return fresh.status, nil
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{}); err != nil {
+				return "disconnected", err
+			}
+			return "connected", nil
+		})
+		if status, ok := result.(string); ok {
+			xrayStatus = status
+			cacheTime := time.Now()
+			if err != nil {
+				cacheTime = cacheTime.Add(-7 * time.Second)
+			}
+			s.healthMu.Lock()
+			s.healthCache = cachedHealth{status: xrayStatus, timestamp: cacheTime}
+			s.healthMu.Unlock()
+		}
+	}
+
+	health := HealthStatus{
+		Status:         "healthy",
+		XrayAPIStatus:  xrayStatus,
+		SSEConnections: s.sseManager.Count(),
+		Uptime:         int64(time.Since(s.startTime).Seconds()),
+		BalancerTag:    s.config.Xray.BalancerTag,
+		Timestamp:      time.Now().Unix(),
+	}
+	if xrayStatus != "connected" {
+		health.Status = "degraded"
+	}
+
+	jsonResponse(w, health, http.StatusOK)
+}

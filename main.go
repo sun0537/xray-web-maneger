@@ -24,7 +24,7 @@ import (
 	"xray-web-manager/sse"
 )
 
-//go:embed frontend/index.html frontend/app.js frontend/style.css
+//go:embed frontend/index.html frontend/core.js frontend/network.js frontend/features.js frontend/style.css
 var frontendFS embed.FS
 
 // waitForReady polls the gRPC connection state until it reaches Ready,

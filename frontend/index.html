@@ -10,87 +10,153 @@
     <title>Xray 节点管理</title>
     <link href="./style.css" rel="stylesheet">
 </head>
-<body class="p-2 sm:p-4 md:p-8">
-    <div class="container max-w-6xl mx-auto">
-        <div class="bg-white/10 backdrop-blur-lg rounded-2xl p-4 md:p-6 mb-6 shadow-2xl border border-white/20">
-            <h1 class="text-2xl md:text-4xl font-bold text-white mb-2 flex items-center gap-3">
-                <svg class="w-7 h-7 md:w-10 md:h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                </svg>
-                Xray 节点管理
-            </h1>
-            <p class="text-white/80 text-sm">均衡器: <code id="balancer-tag" class="bg-white/20 text-cyan-200 px-3 py-1 rounded-lg font-mono">加载中...</code></p>
-            
-            <div id="current-status" class="mt-4 p-3 md:p-4 bg-white/10 rounded-xl border border-white/20">
-                <div class="flex items-center justify-between gap-2">
-                    <span class="text-white/70 text-sm md:text-base">当前出站:</span>
-                    <span id="current-tag" class="font-mono text-base md:text-xl text-cyan-300 font-bold truncate">加载中...</span>
-                </div>
-            </div>
-
-            <div id="stats-container" class="mt-4 p-3 md:p-4 bg-white/10 rounded-xl border border-white/20 text-white/70">
-                <div class="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4 text-xs md:text-sm">
-                    <div>
-                        <div>总上传 <span id="stats-uplink-speed" class="text-xs text-green-300/80"></span></div>
-                        <div id="stats-uplink" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
-                    </div>
-                    <div>
-                        <div>总下载 <span id="stats-downlink-speed" class="text-xs text-green-300/80"></span></div>
-                        <div id="stats-downlink" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
-                    </div>
-                    <div>
-                        <div>运行时间</div>
-                        <div id="stats-uptime" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
-                    </div>
-                    <div>
-                        <div>系统内存</div>
-                        <div id="stats-sys-mem" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
-                    </div>
-                    <div>
-                        <div>Goroutines</div>
-                        <div id="stats-goroutines" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="bg-white/10 backdrop-blur-lg rounded-2xl p-4 md:p-6 shadow-2xl border border-white/20">
-            <div class="flex items-center justify-between mb-5 md:mb-6">
-                <h2 class="text-xl md:text-2xl font-bold text-white flex items-center gap-2">
-                    <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+<body>
+    <div class="app-layout">
+        <nav id="sidebar" class="sidebar">
+            <div class="sidebar-inner">
+                <button id="tab-dashboard" class="sidebar-tab active" aria-label="仪表盘" title="仪表盘">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
                     </svg>
-                    可用节点
-                </h2>
-                <button id="refresh-btn" aria-label="刷新节点列表" class="bg-white/20 hover:bg-white/30 text-white px-3 py-1.5 md:px-4 md:py-2 text-sm md:text-base rounded-lg transition duration-200 flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                    <span class="sidebar-label">仪表盘</span>
+                </button>
+                <button id="tab-logs" class="sidebar-tab" aria-label="日志" title="日志" style="display:none">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                     </svg>
-                    刷新
+                    <span class="sidebar-label">日志</span>
                 </button>
             </div>
-            
-            <div id="outbounds-list" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 md:gap-3">
-                <div class="text-white/70 text-center py-8 col-span-full">
-                    <svg class="animate-spin h-8 w-8 mx-auto mb-2" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    正在加载节点...
+        </nav>
+
+        <main class="main-content">
+            <div id="page-dashboard" class="page-content p-3 md:p-5">
+                <div>
+                    <div class="bg-white/10 backdrop-blur-lg rounded-2xl p-4 md:p-6 mb-6 shadow-2xl border border-white/20">
+                        <h1 class="text-2xl md:text-4xl font-bold text-white mb-2 flex items-center gap-3">
+                            <svg class="w-7 h-7 md:w-10 md:h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                            </svg>
+                            Xray 节点管理
+                        </h1>
+                        <p class="text-white/80 text-sm">均衡器: <code id="balancer-tag" class="bg-white/20 text-cyan-200 px-3 py-1 rounded-lg font-mono">加载中...</code></p>
+
+                        <div id="current-status" class="mt-4 p-3 md:p-4 bg-white/10 rounded-xl border border-white/20">
+                            <div class="flex items-center justify-between gap-2">
+                                <span class="text-white/70 text-sm md:text-base">当前出站:</span>
+                                <span id="current-tag" class="font-mono text-base md:text-xl text-cyan-300 font-bold truncate">加载中...</span>
+                            </div>
+                        </div>
+
+                        <div id="stats-container" class="mt-4 p-3 md:p-4 bg-white/10 rounded-xl border border-white/20 text-white/70">
+                            <div class="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4 text-xs md:text-sm">
+                                <div>
+                                    <div>总上传 <span id="stats-uplink-speed" class="text-xs text-green-300/80"></span></div>
+                                    <div id="stats-uplink" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
+                                </div>
+                                <div>
+                                    <div>总下载 <span id="stats-downlink-speed" class="text-xs text-green-300/80"></span></div>
+                                    <div id="stats-downlink" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
+                                </div>
+                                <div>
+                                    <div>运行时间</div>
+                                    <div id="stats-uptime" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
+                                </div>
+                                <div>
+                                    <div>系统内存</div>
+                                    <div id="stats-sys-mem" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
+                                </div>
+                                <div>
+                                    <div>Goroutines</div>
+                                    <div id="stats-goroutines" class="font-mono text-base md:text-lg text-white font-bold">加载中...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white/10 backdrop-blur-lg rounded-2xl p-4 md:p-6 shadow-2xl border border-white/20">
+                        <div class="flex items-center justify-between mb-5 md:mb-6">
+                            <h2 class="text-xl md:text-2xl font-bold text-white flex items-center gap-2">
+                                <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+                                </svg>
+                                可用节点
+                            </h2>
+                            <button id="refresh-btn" aria-label="刷新节点列表" class="bg-white/20 hover:bg-white/30 text-white px-3 py-1.5 md:px-4 md:py-2 text-sm md:text-base rounded-lg transition duration-200 flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                                </svg>
+                                刷新
+                            </button>
+                        </div>
+
+                        <div id="outbounds-list" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 md:gap-3">
+                            <div class="text-white/70 text-center py-8 col-span-full">
+                                <svg class="animate-spin h-8 w-8 mx-auto mb-2" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                正在加载节点...
+                            </div>
+                        </div>
+
+                        <div class="mt-6 pt-6 border-t border-white/20">
+                            <button id="reset-btn" aria-label="重置为自动均衡模式" class="w-full bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white font-bold py-3 px-6 rounded-xl transition duration-200 shadow-lg flex items-center justify-center gap-2">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                                </svg>
+                                重置为自动均衡
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <div class="mt-6 pt-6 border-t border-white/20">
-                <button id="reset-btn" aria-label="重置为自动均衡模式" class="w-full bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white font-bold py-3 px-6 rounded-xl transition duration-200 shadow-lg flex items-center justify-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                    </svg>
-                    重置为自动均衡
-                </button>
+            <div id="page-logs" class="page-content log-page p-3 md:p-5" style="display:none">
+                <div>
+                    <div class="log-card bg-white/10 backdrop-blur-lg rounded-2xl p-4 md:p-6 shadow-2xl border border-white/20">
+                        <div class="flex items-center justify-between mb-4">
+                            <h2 class="text-xl md:text-2xl font-bold text-white flex items-center gap-2">
+                                <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                                </svg>
+                                Xray 日志
+                                <span id="log-source-badge" class="text-xs bg-white/20 text-cyan-200 px-2 py-1 rounded-lg font-mono"></span>
+                            </h2>
+                            <div class="flex items-center gap-2">
+                                <label class="flex items-center gap-2 text-white/70 text-xs cursor-pointer select-none">
+                                    <input type="checkbox" id="log-auto-refresh" checked class="accent-cyan-500 w-4 h-4">
+                                    自动刷新
+                                </label>
+                                <button id="log-refresh-btn" aria-label="手动刷新日志" class="bg-white/20 hover:bg-white/30 text-white px-3 py-1.5 text-sm rounded-lg transition duration-200 flex items-center gap-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                                    </svg>
+                                    刷新
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <input type="text" id="log-search" placeholder="搜索日志..." class="w-full bg-white/10 border border-white/20 text-white placeholder-white/40 px-3 py-2 rounded-lg text-sm focus:outline-none focus:border-cyan-400 transition duration-200">
+                        </div>
+
+                        <div id="log-container" class="log-viewer">
+                            <div class="text-white/50 text-center py-8 font-mono text-sm">选择日志源或等待加载...</div>
+                        </div>
+
+                        <div class="mt-2 flex items-center justify-between text-xs text-white/40">
+                            <span id="log-status"></span>
+                            <span id="log-line-count"></span>
+                        </div>
+                    </div>
+                </div>
             </div>
-        </div>
+        </main>
     </div>
 
-    <script src="app.js"></script>
+    <script src="core.js"></script>
+    <script src="features.js"></script>
+    <script src="network.js"></script>
 </body>
 </html>

@@ -113,7 +113,9 @@ func (m *MockRoutingClient) TestRoute(ctx context.Context, in *routingpb.TestRou
 	return nil, nil
 }
 func (m *MockRoutingClient) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
-	return nil, nil
+	return &routingpb.GetBalancerInfoResponse{
+		Balancer: &routingpb.BalancerMsg{},
+	}, nil
 }
 func (m *MockRoutingClient) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
 	return nil, nil
@@ -225,12 +227,13 @@ func TestHandleGetOutboundsStatus(t *testing.T) {
 func TestHandleStatsSSE(t *testing.T) {
 	sseMgr := sse.NewManager()
 
-	fetchFn := func() ([]byte, error) {
+	fetchFn := func() (any, error) {
 		stats := StatsData{
 			Uplink: 1024, Downlink: 2048, Uptime: 100,
 			SysMem: 50000000, Goroutines: 10, Outbounds: []OutboundStatusData{},
 		}
-		return json.Marshal(stats)
+		b, err := json.Marshal(stats)
+		return sse.RawEvent{JSON: b}, err
 	}
 	broadcaster := sse.NewBroadcaster(fetchFn, nil, 100*time.Millisecond)
 	defer broadcaster.Stop()
@@ -394,4 +397,182 @@ func TestHandleHealthCheck(t *testing.T) {
 	assert.Equal(t, "connected", health.XrayAPIStatus)
 	assert.Equal(t, "balancer", health.BalancerTag)
 	assert.True(t, health.Uptime >= 99)
+}
+
+func TestHandleGetConfig(t *testing.T) {
+	t.Run("Returns balancer tag and log type", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "my-balancer"},
+				Log:  config.LogConfig{Type: "file"},
+			},
+		}
+
+		req := httptest.NewRequest("GET", "/api/config", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetConfig(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp configResponse
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.Equal(t, "my-balancer", resp.BalancerTag)
+		assert.Equal(t, "file", resp.LogType)
+	})
+
+	t.Run("Empty log type defaults to none", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+				Log:  config.LogConfig{Type: ""},
+			},
+		}
+
+		req := httptest.NewRequest("GET", "/api/config", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetConfig(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp configResponse
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.Equal(t, "none", resp.LogType)
+	})
+}
+
+func TestHandleGetCurrentOutbound(t *testing.T) {
+	t.Run("Returns auto when no override", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient: &MockRoutingClient{},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.True(t, resp.Auto)
+		assert.Equal(t, "", resp.Current)
+	})
+}
+
+type MockRoutingClientWithInfo struct {
+	routingpb.UnimplementedRoutingServiceServer
+	override *routingpb.OverrideInfo
+}
+
+func (m *MockRoutingClientWithInfo) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
+	resp := &routingpb.GetBalancerInfoResponse{}
+	if m.override != nil {
+		resp.Balancer = &routingpb.BalancerMsg{Override: m.override}
+	} else {
+		resp.Balancer = &routingpb.BalancerMsg{}
+	}
+	return resp, nil
+}
+
+func (m *MockRoutingClientWithInfo) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
+	return &routingpb.OverrideBalancerTargetResponse{}, nil
+}
+
+func (m *MockRoutingClientWithInfo) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) AddRule(ctx context.Context, in *routingpb.AddRuleRequest, opts ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientWithInfo) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
+	return nil, nil
+}
+
+func TestHandleGetCurrentOutboundWithOverride(t *testing.T) {
+	t.Run("Returns current tag when override set", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient: &MockRoutingClientWithInfo{
+				override: &routingpb.OverrideInfo{Target: "node-1"},
+			},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.Equal(t, "node-1", resp.Current)
+		assert.False(t, resp.Auto)
+	})
+
+	t.Run("Returns auto when no override target", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient: &MockRoutingClientWithInfo{override: nil},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.Equal(t, "", resp.Current)
+		assert.True(t, resp.Auto)
+	})
+
+	t.Run("Returns 502 when routing fails", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient: &MockRoutingClientError{},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusBadGateway, rr.Code)
+	})
+}
+
+type MockRoutingClientError struct {
+	routingpb.UnimplementedRoutingServiceServer
+}
+
+func (m *MockRoutingClientError) GetBalancerInfo(ctx context.Context, in *routingpb.GetBalancerInfoRequest, opts ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
+	return nil, assert.AnError
+}
+func (m *MockRoutingClientError) OverrideBalancerTarget(ctx context.Context, in *routingpb.OverrideBalancerTargetRequest, opts ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) SubscribeRoutingStats(ctx context.Context, in *routingpb.SubscribeRoutingStatsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) TestRoute(ctx context.Context, in *routingpb.TestRouteRequest, opts ...grpc.CallOption) (*routingpb.RoutingContext, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) AddRule(ctx context.Context, in *routingpb.AddRuleRequest, opts ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) RemoveRule(ctx context.Context, in *routingpb.RemoveRuleRequest, opts ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
+	return nil, nil
+}
+func (m *MockRoutingClientError) ListRule(ctx context.Context, in *routingpb.ListRuleRequest, opts ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
+	return nil, nil
 }

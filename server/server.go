@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
-	"io/fs"
 	"log"
 	"net/http"
 	"sync"
@@ -23,12 +21,7 @@ import (
 	statspb "xray-web-manager/internal/xray-proto/app/stats/command"
 )
 
-type cachedHealth struct {
-	status    string
-	timestamp time.Time
-}
-
-// Server 结构体现在持有配置、SSE 管理器和启动时间
+// Server holds application state and dependencies.
 type Server struct {
 	config            config.Config
 	handlerClient     handlerpb.HandlerServiceClient
@@ -45,7 +38,7 @@ type Server struct {
 	healthCache       cachedHealth
 }
 
-// NewServer 是一个构造函数，用于创建 Server 实例
+// NewServer creates a new Server instance.
 func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, startTime time.Time) *Server {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	s := &Server{
@@ -60,18 +53,22 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 		shutdownCancel:    shutdownCancel,
 	}
 
-	s.broadcaster = sse.NewBroadcaster(func() ([]byte, error) {
+	s.broadcaster = sse.NewBroadcaster(func() (any, error) {
 		stats, err := s.getCombinedStats(s.shutdownCtx)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(stats)
+		b, err := json.Marshal(stats)
+		if err != nil {
+			return nil, err
+		}
+		return sse.RawEvent{JSON: b}, nil
 	}, computeBPS, sseUpdateInterval)
 
 	return s
 }
 
-// RegisterHandlers 负责注册所有路由
+// RegisterHandlers registers all API routes.
 func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", s.handleHealthCheck)
 	mux.HandleFunc("HEAD /api/health", s.handleHealthCheck)
@@ -81,9 +78,10 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/current-outbound", s.handleGetCurrentOutbound)
 	mux.HandleFunc("GET /api/stats-sse", s.handleStatsSSE)
 	mux.HandleFunc("POST /api/switch-outbound", s.handleSwitchOutbound)
+	mux.HandleFunc("GET /api/logs", s.handleGetLogs)
 }
 
-// Shutdown 封装了服务关闭时的清理逻辑
+// Shutdown performs cleanup when the server is shutting down.
 func (s *Server) Shutdown() {
 	log.Println("正在取消广播器上下文...")
 	s.shutdownCancel()
@@ -93,18 +91,10 @@ func (s *Server) Shutdown() {
 	s.sseManager.CloseAll()
 }
 
-// reconnectMonitorInterval is how often we check gRPC connection health.
 const reconnectMonitorInterval = 5 * time.Second
-
-// reconnectRecoveryTimeout is the maximum time to wait for a reconnection
-// to reach Ready state after forcing conn.Connect().
 const reconnectRecoveryTimeout = 10 * time.Second
 
-// StartReconnectMonitor starts a background goroutine that monitors the
-// gRPC connection state. If the connection enters TRANSIENT_FAILURE, it
-// forces a reconnection attempt. This handles the case where Xray is
-// restarted while this service is running.
-// The monitor stops when the server's shutdown context is cancelled.
+// StartReconnectMonitor monitors gRPC connection state and reconnects on failure.
 func (s *Server) StartReconnectMonitor(conn *grpc.ClientConn) {
 	go func() {
 		ticker := time.NewTicker(reconnectMonitorInterval)
@@ -141,19 +131,14 @@ func (s *Server) StartReconnectMonitor(conn *grpc.ClientConn) {
 				}
 
 			case connectivity.Idle, connectivity.Connecting:
-				// Idle: unused connection, gRPC will auto-wake on next RPC.
-				// Connecting: in-flight transition, check again next tick.
 
 			case connectivity.Shutdown:
-				// Connection is permanently closed; nothing to monitor.
 				return
 			}
 		}
 	}()
 }
 
-// waitForReconnect blocks until conn reaches Ready, the server is shutting
-// down, or reconnectRecoveryTimeout elapses. Returns true if Ready.
 func (s *Server) waitForReconnect(conn *grpc.ClientConn) bool {
 	ctx, cancel := context.WithTimeout(s.shutdownCtx, reconnectRecoveryTimeout)
 	defer cancel()
@@ -164,53 +149,4 @@ func (s *Server) waitForReconnect(conn *grpc.ClientConn) bool {
 		}
 	}
 	return true
-}
-
-// RegisterFrontend 负责注册静态文件服务
-func RegisterFrontend(mux *http.ServeMux, devMode bool, frontendFS embed.FS) {
-	if devMode {
-		log.Println("开发模式：使用外部 frontend/ 文件夹")
-		mux.Handle("/", http.FileServer(http.Dir("frontend")))
-	} else {
-		log.Println("生产模式：使用嵌入的前端文件")
-		subFS, err := fs.Sub(frontendFS, "frontend")
-		if err != nil {
-			log.Fatalf("无法创建子文件系统: %v", err)
-		}
-		mux.Handle("/", http.FileServer(http.FS(subFS)))
-	}
-}
-
-// computeBPS enriches a marshaled StatsData with upload/download BPS values
-// computed from the delta between the current snapshot and prev. tickAt and
-// prevAt are captured at the start of each broadcaster tick (before the
-// gRPC fetch), so elapsed is the true wall-clock interval between samples.
-// When prev is nil (first fetch), the BPS fields are left at zero.
-func computeBPS(data []byte, prev []byte, tickAt, prevAt time.Time) []byte {
-	if prev == nil || prevAt.IsZero() {
-		return data
-	}
-	elapsed := tickAt.Sub(prevAt).Seconds()
-	if elapsed <= 0 {
-		return data
-	}
-
-	var curr, last StatsData
-	if json.Unmarshal(data, &curr) != nil || json.Unmarshal(prev, &last) != nil {
-		return data
-	}
-
-	curr.UplinkBPS = float64(curr.Uplink-last.Uplink) / elapsed
-	if curr.UplinkBPS < 0 {
-		curr.UplinkBPS = 0
-	}
-	curr.DownlinkBPS = float64(curr.Downlink-last.Downlink) / elapsed
-	if curr.DownlinkBPS < 0 {
-		curr.DownlinkBPS = 0
-	}
-
-	if enriched, err := json.Marshal(curr); err == nil {
-		return enriched
-	}
-	return data
 }

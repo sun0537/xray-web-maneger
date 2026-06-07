@@ -6,6 +6,10 @@ server:
 xray:
     api_addr: localhost:10085
     balancer_tag: balancer
-auth:                    # 新增：可选 Basic Auth
+auth:                    # 可选 Basic Auth
   username: "admin"       # 不设置则不启用认证
   password: "200"
+log:                     # 可选: Xray 日志显示
+  type: "journal"        # "file" (从文件读取), "journal" (从 systemd journal 读取), "none" (禁用)
+  # file_path: "/var/log/xray/access.log"  # type 为 file 时使用
+  journal: "xray"        # type 为 journal 时使用, systemd 单元名称
