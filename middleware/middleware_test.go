@@ -143,16 +143,14 @@ func captureLog(f func()) string {
 
 func resetLimiter() {
 	limiter.Lock()
-	limiter.requests = make(map[string]slidingWindow)
+	limiter.requests = make(map[string]*slidingWindow)
 	limiter.cleanupCount = 0
 	limiter.Unlock()
 }
 
 func resetAuthLimiter() {
 	authLimiter.Lock()
-	authLimiter.attempts = make(map[string]int)
-	authLimiter.lastAttempt = make(map[string]time.Time)
-	authLimiter.blockedAt = make(map[string]time.Time)
+	authLimiter.states = make(map[string]*authState)
 	authLimiter.Unlock()
 }
 
@@ -164,7 +162,7 @@ func TestRateLimit(t *testing.T) {
 
 	t.Run("Requests within limit pass", func(t *testing.T) {
 		rl := &rateLimiter{
-			requests: make(map[string]slidingWindow),
+			requests: make(map[string]*slidingWindow),
 			limit:    100,
 			window:   time.Minute,
 		}
@@ -180,7 +178,7 @@ func TestRateLimit(t *testing.T) {
 
 	t.Run("Requests over limit get 429", func(t *testing.T) {
 		rl := &rateLimiter{
-			requests: make(map[string]slidingWindow),
+			requests: make(map[string]*slidingWindow),
 			limit:    5,
 			window:   time.Minute,
 		}
@@ -206,7 +204,7 @@ func TestRateLimit(t *testing.T) {
 
 	t.Run("Different IPs tracked independently", func(t *testing.T) {
 		rl := &rateLimiter{
-			requests: make(map[string]slidingWindow),
+			requests: make(map[string]*slidingWindow),
 			limit:    2,
 			window:   time.Minute,
 		}

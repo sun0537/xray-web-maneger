@@ -14,7 +14,6 @@ import (
 	statspb "xray-web-manager/internal/xray-proto/app/stats/command"
 
 	"xray-web-manager/middleware"
-	"xray-web-manager/sse"
 )
 
 const (
@@ -24,6 +23,28 @@ const (
 )
 
 var heartbeatBytes = []byte(": heartbeat\n\n")
+
+var (
+	sseEventPrefix = []byte("event: update\ndata: ")
+	sseEventSuffix = []byte("\n\n")
+)
+
+// sseWriteEvent writes a single SSE "event: update\ndata: <json>\n\n" frame.
+// Avoids the temporary buffer and string formatting of fmt.Fprintf for the
+// hot broadcast path.
+func sseWriteEvent(w http.ResponseWriter, flusher http.Flusher, jsonData []byte) error {
+	if _, err := w.Write(sseEventPrefix); err != nil {
+		return err
+	}
+	if _, err := w.Write(jsonData); err != nil {
+		return err
+	}
+	if _, err := w.Write(sseEventSuffix); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
 
 type StatsData struct {
 	Uplink      int64                `json:"uplink"`
@@ -46,7 +67,7 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		errorMsg := "SSE 不受支持 (http.Flusher 不可用)"
-		log.Printf("SSE 连接失败 [请求来源: %s]: %s", middleware.GetClientIP(r), errorMsg)
+		log.Printf("SSE 连接失败 [请求来源: %s]: %s", middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusInternalServerError, "server")
 		return
 	}
@@ -54,12 +75,12 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	conn := s.sseManager.Add(r.Context())
 	if conn == nil {
 		errorMsg := "服务器正在关闭"
-		log.Printf("SSE 连接被拒绝 [请求来源: %s]: %s", middleware.GetClientIP(r), errorMsg)
+		log.Printf("SSE 连接被拒绝 [请求来源: %s]: %s", middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusServiceUnavailable, "service_unavailable")
 		return
 	}
 
-	ip := middleware.GetClientIP(r)
+	ip := middleware.ClientIPFromContext(r)
 	log.Printf("SSE 连接已建立 [请求来源: %s]，当前连接数: %d", ip, s.sseManager.Count())
 	defer func() {
 		s.sseManager.Remove(conn)
@@ -79,9 +100,15 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	defer lifetime.Stop()
 
 	var initialJSON []byte
-	if cached := s.broadcaster.LastBroadcastJSON(); cached != nil {
-		initialJSON = cached
-	} else {
+	if cached := s.broadcaster.LastBroadcast(); cached != nil {
+		b, marshalErr := json.Marshal(cached)
+		if marshalErr != nil {
+			log.Printf("SSE 缓存数据序列化失败: %v", marshalErr)
+		} else {
+			initialJSON = b
+		}
+	}
+	if initialJSON == nil {
 		stats, statsErr := s.getCombinedStats(connCtx)
 		if statsErr != nil {
 			if !errors.Is(statsErr, context.Canceled) {
@@ -97,8 +124,12 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if initialJSON != nil {
-		fmt.Fprintf(w, "event: update\ndata: %s\n\n", initialJSON)
-		flusher.Flush()
+		if err := sseWriteEvent(w, flusher, initialJSON); err != nil {
+			if connCtx.Err() == nil {
+				log.Printf("SSE 初始数据写入失败 [请求来源: %s]: %v", ip, err)
+			}
+			return
+		}
 	}
 
 	for {
@@ -123,36 +154,23 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			var jsonData []byte
-			switch v := payload.(type) {
-			case sse.RawEvent:
-				jsonData = v.JSON
-			case []byte:
-				jsonData = v
-			default:
-				var marshalErr error
-				jsonData, marshalErr = json.Marshal(v)
-				if marshalErr != nil {
-					log.Printf("SSE 数据序列化失败: %v", marshalErr)
-					continue
-				}
+			jsonData, marshalErr := json.Marshal(payload)
+			if marshalErr != nil {
+				log.Printf("SSE 数据序列化失败: %v", marshalErr)
+				continue
 			}
-			if _, err := fmt.Fprintf(w, "event: update\ndata: %s\n\n", jsonData); err != nil {
+			if err := sseWriteEvent(w, flusher, jsonData); err != nil {
 				if connCtx.Err() == nil {
 					log.Printf("发送统计数据失败 [请求来源: %s]: %v", ip, err)
 				}
 				return
 			}
-			flusher.Flush()
 		}
 	}
 }
 
 func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	stats := StatsData{}
-
-	gCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
-	defer cancel()
 
 	var (
 		wg            sync.WaitGroup
@@ -166,15 +184,21 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		queryResp, queryErr = s.statsClient.QueryStats(gCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
+		ctx, cancel := context.WithTimeout(ctx, grpcTimeout)
+		defer cancel()
+		queryResp, queryErr = s.statsClient.QueryStats(ctx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
 	}()
 	go func() {
 		defer wg.Done()
-		sysResp, sysErr = s.statsClient.GetSysStats(gCtx, &statspb.SysStatsRequest{})
+		ctx, cancel := context.WithTimeout(ctx, grpcTimeout)
+		defer cancel()
+		sysResp, sysErr = s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{})
 	}()
 	go func() {
 		defer wg.Done()
-		outboundStats = s.getAllOutboundStatuses(gCtx)
+		ctx, cancel := context.WithTimeout(ctx, grpcTimeout)
+		defer cancel()
+		outboundStats = s.getAllOutboundStatuses(ctx)
 	}()
 	wg.Wait()
 
@@ -198,11 +222,12 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	}
 
 	if sysErr != nil {
-		if !errors.Is(sysErr, context.Canceled) {
-			log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
-			stats.Degraded = true
-			failedSources++
+		if errors.Is(sysErr, context.Canceled) {
+			return stats, sysErr
 		}
+		log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
+		stats.Degraded = true
+		failedSources++
 	} else if sysResp != nil {
 		stats.Uptime = int64(sysResp.GetUptime())
 		stats.SysMem = sysResp.GetSys()
@@ -210,12 +235,15 @@ func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
 	}
 
 	if outboundStats == nil {
-		failedSources++
+		stats.Outbounds = []OutboundStatusData{}
+	} else {
+		stats.Outbounds = outboundStats
 	}
 
-	stats.Outbounds = outboundStats
-
-	if failedSources >= 3 {
+	// After Task 1 fix: only query and sys sources count as "failure" because
+	// observatory returning nil means "no data" (not an error). The cached
+	// Outbounds empty-slice path keeps the JSON shape stable.
+	if failedSources >= 2 {
 		return stats, fmt.Errorf("all data sources failed")
 	}
 	return stats, nil
@@ -232,14 +260,10 @@ func computeBPS(data, prev any, tickAt, prevAt time.Time) any {
 		return data
 	}
 
-	currRaw, ok1 := data.(sse.RawEvent)
-	prevRaw, ok2 := prev.(sse.RawEvent)
+	curr, ok1 := data.(StatsData)
+	last, ok2 := prev.(StatsData)
 	if !ok1 || !ok2 {
-		return data
-	}
-
-	var curr, last StatsData
-	if json.Unmarshal(currRaw.JSON, &curr) != nil || json.Unmarshal(prevRaw.JSON, &last) != nil {
+		log.Printf("警告: computeBPS 类型断言失败: data=%T, prev=%T", data, prev)
 		return data
 	}
 
@@ -252,8 +276,5 @@ func computeBPS(data, prev any, tickAt, prevAt time.Time) any {
 		curr.DownlinkBPS = 0
 	}
 
-	if enriched, err := json.Marshal(curr); err == nil {
-		return sse.RawEvent{JSON: enriched}
-	}
-	return data
+	return curr
 }

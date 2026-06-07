@@ -65,14 +65,10 @@ func TestComputeBPS(t *testing.T) {
 	t.Run("Normal positive BPS", func(t *testing.T) {
 		curr := StatsData{Uplink: 2048, Downlink: 4096, Outbounds: []OutboundStatusData{}}
 		last := StatsData{Uplink: 1024, Downlink: 2048, Outbounds: []OutboundStatusData{}}
-		currJSON, _ := json.Marshal(curr)
-		lastJSON, _ := json.Marshal(last)
 
-		result := computeBPS(sse.RawEvent{JSON: currJSON}, sse.RawEvent{JSON: lastJSON}, now, prev)
+		result := computeBPS(curr, last, now, prev)
 
-		raw := result.(sse.RawEvent)
-		var enriched StatsData
-		json.Unmarshal(raw.JSON, &enriched)
+		enriched := result.(StatsData)
 		assert.InDelta(t, 512.0, enriched.UplinkBPS, 0.1)
 		assert.InDelta(t, 1024.0, enriched.DownlinkBPS, 0.1)
 	})
@@ -80,31 +76,27 @@ func TestComputeBPS(t *testing.T) {
 	t.Run("Counter reset clamps to zero", func(t *testing.T) {
 		curr := StatsData{Uplink: 100, Downlink: 50, Outbounds: []OutboundStatusData{}}
 		last := StatsData{Uplink: 1024, Downlink: 2048, Outbounds: []OutboundStatusData{}}
-		currJSON, _ := json.Marshal(curr)
-		lastJSON, _ := json.Marshal(last)
 
-		result := computeBPS(sse.RawEvent{JSON: currJSON}, sse.RawEvent{JSON: lastJSON}, now, prev)
+		result := computeBPS(curr, last, now, prev)
 
-		raw := result.(sse.RawEvent)
-		var enriched StatsData
-		json.Unmarshal(raw.JSON, &enriched)
+		enriched := result.(StatsData)
 		assert.Equal(t, 0.0, enriched.UplinkBPS)
 		assert.Equal(t, 0.0, enriched.DownlinkBPS)
 	})
 
 	t.Run("First fetch returns data unchanged", func(t *testing.T) {
-		data := sse.RawEvent{JSON: []byte(`{"uplink":100}`)}
+		data := StatsData{Uplink: 100}
 		result := computeBPS(data, nil, now, time.Time{})
 		assert.Equal(t, data, result)
 	})
 
 	t.Run("Zero elapsed returns data unchanged", func(t *testing.T) {
-		data := sse.RawEvent{JSON: []byte(`{"uplink":100}`)}
+		data := StatsData{Uplink: 100}
 		result := computeBPS(data, data, now, now)
 		assert.Equal(t, data, result)
 	})
 
-	t.Run("Invalid JSON returns data unchanged", func(t *testing.T) {
+	t.Run("Type mismatch returns data unchanged", func(t *testing.T) {
 		bad := sse.RawEvent{JSON: []byte("bad")}
 		result := computeBPS(bad, bad, now, prev)
 		assert.Equal(t, bad, result)

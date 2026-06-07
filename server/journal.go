@@ -5,13 +5,14 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/sdjournal"
 )
 
-func readJournalLog(ctx context.Context, unit string, maxLines int, search string) ([]string, error) {
+func readJournalLog(ctx context.Context, unit string, maxLines int, search string, maxBytes int64) ([]string, error) {
 	j, err := sdjournal.NewJournal()
 	if err != nil {
 		return nil, fmt.Errorf("打开 journal 失败: %w", err)
@@ -29,6 +30,7 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 
 	searchLower := strings.ToLower(search)
 	lines := make([]string, 0, maxLines)
+	totalBytes := 0
 
 	for len(lines) < maxLines {
 		select {
@@ -47,6 +49,7 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 
 		msg, err := j.GetData("MESSAGE")
 		if err != nil {
+			log.Printf("跳过 journal 记录: %v", err)
 			continue
 		}
 		msg = strings.TrimPrefix(msg, "MESSAGE=")
@@ -56,12 +59,20 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 		}
 
 		usec, err := j.GetRealtimeUsec()
+		var line string
 		if err == nil {
 			ts := time.Unix(int64(usec)/1e6, (int64(usec)%1e6)*1000).Format(time.RFC3339)
-			lines = append(lines, ts+" "+msg)
+			line = ts + " " + msg
 		} else {
-			lines = append(lines, msg)
+			line = msg
 		}
+
+		totalBytes += len(line)
+		if int64(totalBytes) > maxBytes {
+			lines = append(lines, "[日志输出过大，已截断]")
+			break
+		}
+		lines = append(lines, line)
 	}
 
 	for left, right := 0, len(lines)-1; left < right; left, right = left+1, right-1 {

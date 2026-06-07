@@ -22,19 +22,17 @@ server:
 xray:
     api_addr: localhost:10085
     balancer_tag: balancer
-# 不设置或留空 = 不启用认证（默认行为）
-auth: {}
-
-# 启用认证
-auth:
-  username: "admin"
-  password: "your_password"
+# 启用认证 (不设置 auth 则不启用)
+# auth:
+#   username: "admin"
+#   password: "your_password"
 
 # 日志查看 (可选)
 log:
   type: "journal"          # "file" | "journal" | "none"(默认不启用)
   # file_path: "/var/log/xray/access.log"  # type=file 时必填
   journal: "xray"          # type=journal 时必填, systemd 服务名 (不含 .service 后缀)
+  # max_bytes: 10485760    # 单次 /api/logs 返回的字节上限, 默认 10MB
 ```
 - server.host:server.port 监听的 IP 和 端口，默认为 0.0.0.0:9098，web 服务监听的端口
 - allowed_origins: ["http://192.168.8.10:9098"] 允许访问的来源
@@ -44,10 +42,11 @@ log:
 - log.type 日志来源类型：`file` 从文件读取，`journal` 从 systemd journal 读取，`none` 或不配置则不启用日志功能
 - log.file_path 日志文件路径，仅 `type: file` 时必填
 - log.journal systemd 服务名称（不含 `.service` 后缀），仅 `type: journal` 时必填
+- log.max_bytes 单次 `/api/logs` 返回的字节上限，默认 10MB (10485760)
 
 启动，默认加载二进制文件所在位置的配置文件
 ```bash
-./xray-web-manager -c config.yaml
+./xray-web-manager -config config.yaml
 ```
 访问浏览器http://<服务器IP>:端口
 
@@ -103,21 +102,27 @@ make run
 ├── main.go                  # 入口：gRPC 连接、HTTP 服务器、信号处理
 ├── config/                  # 配置加载与验证
 ├── middleware/               # HTTP 中间件
+│   ├── middleware.go        #   ErrorResponse 类型定义
 │   ├── auth.go              #   BasicAuth + 认证限流
 │   ├── cors.go              #   Origin/Referer 来源检查
-│   ├── logger.go            #   请求日志 + ClientIP
+│   ├── logger.go            #   请求日志 + ClientIPFromContext
 │   ├── ratelimit.go         #   滑动窗口限流
 │   ├── recovery.go          #   Panic 恢复
 │   └── security.go          #   安全响应头
 ├── server/                  # HTTP 处理器
+│   ├── server.go            #   Server 结构体、路由注册、生命周期
+│   ├── handlers.go          #   通用 JSON 响应工具函数
 │   ├── handlerhealth.go     #   健康检查
 │   ├── handlerlog.go        #   日志读取 (文件)
 │   ├── handleroutbound.go   #   出站管理
 │   ├── handlerstats.go      #   SSE 实时统计
 │   ├── journal.go           #   systemd journal (Linux)
-│   ├── journalstub.go       #   journal 桩 (非 Linux)
+│   ├── journaldisabled.go   #   journal 占位 (nojournal 构建时禁用)
+│   ├── journalnonlinux.go   #   journal 占位 (非 Linux 平台)
 │   └── frontend.go          #   静态文件服务
 ├── sse/                     # SSE 广播器与连接管理
+│   ├── broadcaster.go       #   带去重的周期广播器
+│   └── manager.go           #   SSE 连接生命周期管理
 ├── frontend/                # 前端资源
 │   ├── core.js              #   全局状态 + UI 管理器
 │   ├── features.js          #   节点卡片 + 标签页 + 日志

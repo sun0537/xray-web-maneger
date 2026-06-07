@@ -14,11 +14,11 @@ func TestCleanupStaleKeys(t *testing.T) {
 
 	now := time.Now()
 	limiter.Lock()
-	limiter.requests["old-ip"] = slidingWindow{
+	limiter.requests["old-ip"] = &slidingWindow{
 		currCount:   5,
 		windowStart: now.Add(-3 * time.Minute),
 	}
-	limiter.requests["new-ip"] = slidingWindow{
+	limiter.requests["new-ip"] = &slidingWindow{
 		currCount:   5,
 		windowStart: now.Add(-30 * time.Second),
 	}
@@ -36,7 +36,7 @@ func TestCleanupStaleKeys(t *testing.T) {
 
 func TestSlidingWindowTransitions(t *testing.T) {
 	rl := &rateLimiter{
-		requests: make(map[string]slidingWindow),
+		requests: make(map[string]*slidingWindow),
 		limit:    10,
 		window:   time.Minute,
 	}
@@ -46,7 +46,7 @@ func TestSlidingWindowTransitions(t *testing.T) {
 	})
 
 	t.Run("Expired window resets", func(t *testing.T) {
-		rl.requests["5.6.7.8"] = slidingWindow{
+		rl.requests["5.6.7.8"] = &slidingWindow{
 			currCount:   20,
 			windowStart: time.Now().Add(-3 * time.Minute),
 		}
@@ -55,12 +55,12 @@ func TestSlidingWindowTransitions(t *testing.T) {
 
 	t.Run("Sliding window blend allows under limit", func(t *testing.T) {
 		rl2 := &rateLimiter{
-			requests: make(map[string]slidingWindow),
+			requests: make(map[string]*slidingWindow),
 			limit:    10,
 			window:   time.Minute,
 		}
 		now := time.Now()
-		rl2.requests["blend-ip"] = slidingWindow{
+		rl2.requests["blend-ip"] = &slidingWindow{
 			prevCount:   8,
 			currCount:   0,
 			windowStart: now.Add(-61 * time.Second),
@@ -113,10 +113,10 @@ func TestClientIP(t *testing.T) {
 	})
 }
 
-func TestGetClientIPFallback(t *testing.T) {
+func TestClientIPFromContextFallback(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "172.16.0.1:9999"
-	ip := GetClientIP(req)
+	ip := ClientIPFromContext(req)
 	assert.Equal(t, "172.16.0.1", ip)
 }
 
@@ -237,10 +237,10 @@ func TestLogger(t *testing.T) {
 		assert.Contains(t, logOutput, "201")
 	})
 
-	t.Run("GetClientIP from context", func(t *testing.T) {
+	t.Run("ClientIPFromContext from context", func(t *testing.T) {
 		var capturedIP string
 		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			capturedIP = GetClientIP(r)
+			capturedIP = ClientIPFromContext(r)
 			w.WriteHeader(http.StatusOK)
 		})
 		handler := Logger(true, inner)
@@ -260,7 +260,7 @@ func TestRateLimitTrustProxy(t *testing.T) {
 	})
 
 	rl := &rateLimiter{
-		requests: make(map[string]slidingWindow),
+		requests: make(map[string]*slidingWindow),
 		limit:    3,
 		window:   time.Minute,
 	}

@@ -48,7 +48,7 @@ func Logger(trustProxy bool, next http.Handler) http.Handler {
 	})
 }
 
-func GetClientIP(r *http.Request) string {
+func ClientIPFromContext(r *http.Request) string {
 	if ip, ok := r.Context().Value(clientIPKey).(string); ok {
 		return ip
 	}

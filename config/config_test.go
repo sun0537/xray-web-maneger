@@ -19,6 +19,7 @@ func TestValidateConfig(t *testing.T) {
 			config: Config{
 				Server: ServerConfig{Host: "localhost", Port: "8080"},
 				Xray:   XrayConfig{ApiAddr: "localhost:10085", BalancerTag: "balancer"},
+				Log:    LogConfig{MaxBytes: 10 * 1024 * 1024},
 			},
 			wantErr: false,
 		},
@@ -91,8 +92,27 @@ func TestValidateConfig(t *testing.T) {
 			config: Config{
 				Server: ServerConfig{Host: "localhost", Port: "8080", AllowedOrigins: []string{"https://example.com"}},
 				Xray:   XrayConfig{ApiAddr: "localhost:10085", BalancerTag: "balancer"},
+				Log:    LogConfig{MaxBytes: 10 * 1024 * 1024},
 			},
 			wantErr: false,
+		},
+		{
+			name: "log.max_bytes = 0 应被拒绝",
+			config: Config{
+				Server: ServerConfig{Host: "localhost", Port: "8080"},
+				Xray:   XrayConfig{ApiAddr: "localhost:10085", BalancerTag: "balancer"},
+				Log:    LogConfig{MaxBytes: 0},
+			},
+			wantErr: true,
+		},
+		{
+			name: "log.max_bytes 负值应被拒绝",
+			config: Config{
+				Server: ServerConfig{Host: "localhost", Port: "8080"},
+				Xray:   XrayConfig{ApiAddr: "localhost:10085", BalancerTag: "balancer"},
+				Log:    LogConfig{MaxBytes: -1},
+			},
+			wantErr: true,
 		},
 	}
 
@@ -129,7 +149,7 @@ func TestSaveDefaultConfig(t *testing.T) {
 
 	info, err := os.Stat(path)
 	assert.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm())
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 }
 
 func TestApplyDefault(t *testing.T) {
@@ -233,65 +253,73 @@ log:
 }
 
 func TestValidateConfigLog(t *testing.T) {
+	const defaultMaxBytes = 10 * 1024 * 1024
+
 	validBase := func() Config {
 		return Config{
 			Server: ServerConfig{Host: "localhost", Port: "8080"},
 			Xray:   XrayConfig{ApiAddr: "localhost:10085", BalancerTag: "balancer"},
+			Log:    LogConfig{MaxBytes: defaultMaxBytes},
 		}
 	}
 
 	t.Run("Log type none is valid", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "none"}
+		cfg.Log.Type = "none"
 		assert.NoError(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Log type empty is valid", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: ""}
+		cfg.Log.Type = ""
 		assert.NoError(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Log type file valid", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "file", FilePath: "/var/log/xray.log"}
+		cfg.Log.Type = "file"
+		cfg.Log.FilePath = "/var/log/xray.log"
 		assert.NoError(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Log type file missing path", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "file", FilePath: ""}
+		cfg.Log.Type = "file"
+		cfg.Log.FilePath = ""
 		assert.Error(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Log type journal valid", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "journal", Journal: "xray"}
+		cfg.Log.Type = "journal"
+		cfg.Log.Journal = "xray"
 		assert.NoError(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Log type journal missing name", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "journal", Journal: ""}
+		cfg.Log.Type = "journal"
+		cfg.Log.Journal = ""
 		assert.Error(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Log type journal invalid chars", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "journal", Journal: "xray service"}
+		cfg.Log.Type = "journal"
+		cfg.Log.Journal = "xray service"
 		assert.Error(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Log type journal with dots and dashes", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "journal", Journal: "xray-v2.service"}
+		cfg.Log.Type = "journal"
+		cfg.Log.Journal = "xray-v2.service"
 		assert.NoError(t, ValidateConfig(cfg))
 	})
 
 	t.Run("Invalid log type", func(t *testing.T) {
 		cfg := validBase()
-		cfg.Log = LogConfig{Type: "syslog"}
+		cfg.Log.Type = "syslog"
 		assert.Error(t, ValidateConfig(cfg))
 	})
 }
-

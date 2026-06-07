@@ -14,10 +14,10 @@ import (
 
 // ServerConfig holds the HTTP server configuration.
 type ServerConfig struct {
-	Host                string   `yaml:"host"`                  // 监听地址
-	Port                string   `yaml:"port"`                  // 监听端口
-	AllowedOrigins      []string `yaml:"allowed_origins"`       // (可选) 允许访问的来源 (用于安全检查)
-	TrustProxyHeaders   bool     `yaml:"trust_proxy_headers"`   // 是否信任 X-Real-IP / X-Forwarded-For 头 (仅在反向代理后设为 true)
+	Host              string   `yaml:"host"`                // 监听地址
+	Port              string   `yaml:"port"`                // 监听端口
+	AllowedOrigins    []string `yaml:"allowed_origins"`     // (可选) 允许访问的来源 (用于安全检查)
+	TrustProxyHeaders bool     `yaml:"trust_proxy_headers"` // 是否信任 X-Real-IP / X-Forwarded-For 头 (仅在反向代理后设为 true)
 }
 
 // XrayConfig holds the Xray gRPC API connection configuration.
@@ -37,6 +37,7 @@ type LogConfig struct {
 	Type     string `yaml:"type"`      // "file", "journal", or "none"
 	FilePath string `yaml:"file_path"` // log file path (when type=file)
 	Journal  string `yaml:"journal"`   // systemd unit name (when type=journal)
+	MaxBytes int64  `yaml:"max_bytes"` // upper bound on bytes returned per /api/logs call (default 10MB)
 }
 
 // Config 配置文件结构
@@ -59,7 +60,8 @@ func newDefaultConfig() Config {
 			BalancerTag: "balancer",
 		},
 		Log: LogConfig{
-			Type: "none",
+			Type:     "none",
+			MaxBytes: 10 * 1024 * 1024, // 10MB
 		},
 	}
 }
@@ -175,6 +177,10 @@ func ValidateConfig(config Config) error {
 		}
 	}
 
+	if config.Log.MaxBytes <= 0 {
+		return fmt.Errorf("log.max_bytes 必须为正整数，得到: %d", config.Log.MaxBytes)
+	}
+
 	switch config.Log.Type {
 	case "none", "":
 	case "file":
@@ -208,5 +214,5 @@ func SaveDefaultConfig(filename string) error {
 	}
 
 	header := []byte("# Xray Web Manager 配置文件\n\n")
-	return os.WriteFile(filename, append(header, data...), 0644)
+	return os.WriteFile(filename, append(header, data...), 0600)
 }

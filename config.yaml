@@ -13,3 +13,4 @@ log:                     # 可选: Xray 日志显示
   type: "journal"        # "file" (从文件读取), "journal" (从 systemd journal 读取), "none" (禁用)
   # file_path: "/var/log/xray/access.log"  # type 为 file 时使用
   journal: "xray"        # type 为 journal 时使用, systemd 单元名称
+  max_bytes: 10485760    # 单次 /api/logs 返回的字节上限, 默认 10MB

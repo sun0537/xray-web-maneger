@@ -32,12 +32,13 @@ const readyPollInterval = 200 * time.Millisecond
 // waitForReady polls the gRPC connection state until it reaches Ready,
 // TransientFailure, or the timeout expires. Returns true if Ready.
 func waitForReady(conn *grpc.ClientConn, timeout time.Duration) bool {
-	deadline := time.After(timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	poll := time.NewTicker(readyPollInterval)
 	defer poll.Stop()
 	for {
 		select {
-		case <-deadline:
+		case <-timer.C:
 			return false
 		case <-poll.C:
 			state := conn.GetState()
@@ -159,7 +160,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Printf("优雅关闭失败: %v，强制关闭", err)
-			httpServer.Close()
+			if closeErr := httpServer.Close(); closeErr != nil {
+				log.Printf("强制关闭 HTTP 服务器失败: %v", closeErr)
+			}
 		}
 		cancel()
 

@@ -18,6 +18,8 @@ func RegisterFrontend(mux *http.ServeMux, devMode bool, frontendFS embed.FS) {
 		if err != nil {
 			log.Fatalf("无法创建子文件系统: %v", err)
 		}
+		// embed.FS + http.FS already reject "." / ".." / absolute paths,
+		// so the embedded FS is safe against directory traversal by design.
 		mux.Handle("/", http.FileServer(http.FS(subFS)))
 	}
 }

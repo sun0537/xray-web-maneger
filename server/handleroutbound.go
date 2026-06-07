@@ -43,7 +43,7 @@ func (s *Server) handleGetOutbounds(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.handlerClient.ListOutbounds(ctx, &handlerpb.ListOutboundsRequest{})
 	if err != nil {
 		errorMsg := fmt.Sprintf("无法获取出站列表: %v", err)
-		log.Printf("获取出站列表失败 [请求来源: %s]: %s", middleware.GetClientIP(r), errorMsg)
+		log.Printf("获取出站列表失败 [请求来源: %s]: %s", middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusInternalServerError, "server")
 		return
 	}
@@ -101,7 +101,7 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 	})
 	if err != nil {
 		errorMsg := fmt.Sprintf("获取负载均衡器信息失败: %v", err)
-		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %s", s.config.Xray.BalancerTag, middleware.GetClientIP(r), errorMsg)
+		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %s", s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusBadGateway, "bad_gateway")
 		return
 	}
@@ -125,23 +125,14 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 		io.Copy(io.Discard, r.Body)
 		errorMsg := fmt.Sprintf("无效的请求体: %v", err)
-		log.Printf("切换出站失败 [请求来源: %s, 解码错误]: %s", middleware.GetClientIP(r), errorMsg)
+		log.Printf("切换出站失败 [请求来源: %s, 解码错误]: %s", middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusBadRequest, "validation")
 		return
 	}
 
-	if len(reqBody.OutboundTag) > 256 {
-		jsonError(w, "出站标签过长", http.StatusBadRequest, "validation")
+	if err := validateOutboundTag(reqBody.OutboundTag); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest, "validation")
 		return
-	}
-	if reqBody.OutboundTag != "" {
-		for _, c := range reqBody.OutboundTag {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-				c == '-' || c == '_' || c == '.' || c == ':') {
-				jsonError(w, "出站标签包含非法字符", http.StatusBadRequest, "validation")
-				return
-			}
-		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
@@ -153,13 +144,29 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		errorMsg := fmt.Sprintf("切换出站失败: %v", err)
-		log.Printf("切换出站失败 [目标: %s, 负载均衡器: %s, 请求来源: %s]: %s", reqBody.OutboundTag, s.config.Xray.BalancerTag, middleware.GetClientIP(r), errorMsg)
+		log.Printf("切换出站失败 [目标: %s, 负载均衡器: %s, 请求来源: %s]: %s", reqBody.OutboundTag, s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusInternalServerError, "server")
 		return
 	}
 
-	log.Printf("审计: 切换出站成功 [目标: %s, 请求来源: %s]", reqBody.OutboundTag, middleware.GetClientIP(r))
+	log.Printf("审计: 切换出站成功 [目标: %s, 请求来源: %s]", reqBody.OutboundTag, middleware.ClientIPFromContext(r))
 	jsonResponse(w, successResponse{Status: "success"}, http.StatusOK)
+}
+
+func validateOutboundTag(tag string) error {
+	if len(tag) > 256 {
+		return fmt.Errorf("出站标签过长")
+	}
+	if tag == "" {
+		return nil
+	}
+	for _, c := range tag {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == ':') {
+			return fmt.Errorf("出站标签包含非法字符")
+		}
+	}
+	return nil
 }
 
 func (s *Server) getAllOutboundStatuses(ctx context.Context) []OutboundStatusData {

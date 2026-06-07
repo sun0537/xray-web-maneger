@@ -304,13 +304,13 @@ func TestHandleGetOutbounds(t *testing.T) {
 
 func TestHandleGetOutboundsStatus(t *testing.T) {
 	s := &Server{
-		config:            config.Config{},
+		config: config.Config{},
 		observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
 			{OutboundTag: "node-1", Alive: true, Delay: 50},
 			{OutboundTag: "node-2", Alive: true, Delay: 120},
 			{OutboundTag: "node-3", Alive: false, Delay: 0},
 		}},
-		startTime:         time.Time{},
+		startTime: time.Time{},
 	}
 
 	req, err := http.NewRequest("GET", "/api/outbounds-status", nil)
@@ -342,12 +342,10 @@ func TestHandleStatsSSE(t *testing.T) {
 	sseMgr := sse.NewManager()
 
 	fetchFn := func() (any, error) {
-		stats := StatsData{
+		return StatsData{
 			Uplink: 1024, Downlink: 2048, Uptime: 100,
 			SysMem: 50000000, Goroutines: 10, Outbounds: []OutboundStatusData{},
-		}
-		b, err := json.Marshal(stats)
-		return sse.RawEvent{JSON: b}, err
+		}, nil
 	}
 	broadcaster := sse.NewBroadcaster(fetchFn, nil, 100*time.Millisecond)
 	defer broadcaster.Stop()
@@ -406,7 +404,6 @@ func TestHandleStatsSSE(t *testing.T) {
 	// With dedup, unchanged data is suppressed. We just verify the connection
 	// produces at least one valid SSE frame — further frames are optional.
 }
-
 
 func TestHandleSwitchOutbound(t *testing.T) {
 	s := &Server{
@@ -488,6 +485,97 @@ func TestHandleHealthCheck(t *testing.T) {
 	assert.True(t, health.Uptime >= 99)
 }
 
+// contextRecordingStatsClient captures the context passed to GetSysStats so a
+// test can later assert that the context is independent of any specific
+// request's context. Used to regression-test the singleflight context bug.
+type contextRecordingStatsClient struct {
+	MockStatsClient
+	received chan context.Context
+}
+
+func (c *contextRecordingStatsClient) GetSysStats(ctx context.Context, in *statspb.SysStatsRequest, opts ...grpc.CallOption) (*statspb.SysStatsResponse, error) {
+	// Non-blocking send so the producer is not stuck if the consumer isn't ready.
+	select {
+	case c.received <- ctx:
+	default:
+	}
+	// Block until either the context is cancelled OR a short success window.
+	// This is the window during which the test cancels the request context.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(300 * time.Millisecond):
+		return &statspb.SysStatsResponse{Uptime: 1, Sys: 1, NumGoroutine: 1}, nil
+	}
+}
+
+// TestHandleHealthCheckSingleflightContextIsRequestIndependent regression-tests
+// the bug where singleflight.Do captured r.Context() in its closure, so that
+// if the first request to coalesce disconnected, all waiters would see
+// "disconnected" even though the gRPC call was perfectly capable of succeeding.
+//
+// With the fix, the gRPC call uses s.shutdownCtx and survives request
+// cancellation. The captured context must NOT be cancelled when the
+// initiating request's context is cancelled.
+func TestHandleHealthCheckSingleflightContextIsRequestIndependent(t *testing.T) {
+	mock := &contextRecordingStatsClient{
+		received: make(chan context.Context, 1),
+	}
+	sseMgr := sse.NewManager()
+	s := &Server{
+		config: config.Config{
+			Xray: config.XrayConfig{BalancerTag: "balancer"},
+		},
+		statsClient: mock,
+		sseManager:  sseMgr,
+		startTime:   time.Now().Add(-100 * time.Second),
+		shutdownCtx: context.Background(),
+	}
+
+	// Issue a health check with a cancelable request context.
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(reqCtx, "GET", "/api/health", nil)
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		s.handleHealthCheck(rr, req)
+		close(done)
+	}()
+
+	// Wait until the gRPC call is in flight.
+	var gRPCCtx context.Context
+	select {
+	case gRPCCtx = <-mock.received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: gRPC call was never made")
+	}
+
+	// Cancel the request that triggered the singleflight call. With the bug,
+	// this cancellation would propagate into gRPCCtx and fail the call.
+	cancelReq()
+
+	// No time.Sleep is needed: Go's cancelCtx.cancel() synchronously closes
+	// the done channel of the parent and walks the children tree, so any
+	// context derived from reqCtx is already in the cancelled state the
+	// instant cancelReq() returns. With the fix, gRPCCtx is NOT a child of
+	// reqCtx, so its Err() must still be nil here.
+
+	// The gRPC context must NOT be cancelled.
+	assert.NoError(t, gRPCCtx.Err(), "gRPC context must not be cancelled when the request context is cancelled")
+
+	// Wait for the handler to return and confirm the call succeeded.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: handler did not return")
+	}
+
+	var health HealthStatus
+	assert.NoError(t, json.Unmarshal(rr.Body.Bytes(), &health))
+	assert.Equal(t, "connected", health.XrayAPIStatus, "gRPC call should succeed despite the initiating request being cancelled")
+}
+
 func TestHandleGetConfig(t *testing.T) {
 	t.Run("Returns balancer tag and log type", func(t *testing.T) {
 		s := &Server{
@@ -547,7 +635,6 @@ func TestHandleGetCurrentOutbound(t *testing.T) {
 		assert.Equal(t, "", resp.Current)
 	})
 }
-
 
 func TestHandleGetCurrentOutboundWithOverride(t *testing.T) {
 	t.Run("Returns current tag when override set", func(t *testing.T) {
@@ -609,7 +696,7 @@ func TestHandleGetCurrentOutboundWithOverride(t *testing.T) {
 func TestGetCombinedStats(t *testing.T) {
 	t.Run("All sources succeed", func(t *testing.T) {
 		s := &Server{
-			statsClient:       &MockStatsClient{},
+			statsClient: &MockStatsClient{},
 			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
 				{OutboundTag: "node-1", Alive: true, Delay: 50},
 			}},
@@ -627,7 +714,7 @@ func TestGetCombinedStats(t *testing.T) {
 
 	t.Run("QueryStats fails — degraded", func(t *testing.T) {
 		s := &Server{
-			statsClient:       &mockStatsClientWithError{queryErr: fmt.Errorf("stats unavailable")},
+			statsClient: &mockStatsClientWithError{queryErr: fmt.Errorf("stats unavailable")},
 			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
 				{OutboundTag: "node-1", Alive: true, Delay: 50},
 			}},
@@ -641,7 +728,7 @@ func TestGetCombinedStats(t *testing.T) {
 
 	t.Run("GetSysStats fails — degraded", func(t *testing.T) {
 		s := &Server{
-			statsClient:       &mockStatsClientWithError{sysErr: fmt.Errorf("sys unavailable")},
+			statsClient: &mockStatsClientWithError{sysErr: fmt.Errorf("sys unavailable")},
 			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
 				{OutboundTag: "node-1", Alive: true, Delay: 50},
 			}},
@@ -653,7 +740,7 @@ func TestGetCombinedStats(t *testing.T) {
 		assert.Equal(t, int64(0), stats.Uptime)
 	})
 
-	t.Run("Observatory fails — outbounds nil", func(t *testing.T) {
+	t.Run("Observatory fails — outbounds empty slice", func(t *testing.T) {
 		s := &Server{
 			statsClient:       &MockStatsClient{},
 			observatoryClient: &mockObservatoryClientError{},
@@ -661,10 +748,11 @@ func TestGetCombinedStats(t *testing.T) {
 		stats, err := s.getCombinedStats(context.Background())
 		assert.NoError(t, err)
 		assert.Equal(t, int64(1024), stats.Uplink)
-		assert.Nil(t, stats.Outbounds)
+		assert.NotNil(t, stats.Outbounds)
+		assert.Empty(t, stats.Outbounds)
 	})
 
-	t.Run("All sources fail — returns error", func(t *testing.T) {
+	t.Run("Query and sys both fail — returns error", func(t *testing.T) {
 		s := &Server{
 			statsClient:       &mockStatsClientWithError{queryErr: fmt.Errorf("q"), sysErr: fmt.Errorf("s")},
 			observatoryClient: &mockObservatoryClientError{},
@@ -686,4 +774,3 @@ func TestGetCombinedStats(t *testing.T) {
 		s.getCombinedStats(ctx)
 	})
 }
-
