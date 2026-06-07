@@ -151,6 +151,7 @@ func resetLimiter() {
 func resetAuthLimiter() {
 	authLimiter.Lock()
 	authLimiter.attempts = make(map[string]int)
+	authLimiter.lastAttempt = make(map[string]time.Time)
 	authLimiter.blockedAt = make(map[string]time.Time)
 	authLimiter.Unlock()
 }

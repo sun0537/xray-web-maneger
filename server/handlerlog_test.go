@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 
@@ -270,4 +271,39 @@ func TestFileTooLargeError(t *testing.T) {
 	assert.Contains(t, msg, "15MB")
 	assert.Contains(t, msg, "最大支持")
 	assert.Contains(t, msg, "10MB")
+}
+
+func TestTruncateSearch(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		max     int
+		want    string
+	}{
+		{"no truncation short", "hello", 10, "hello"},
+		{"no truncation exact", "hello", 5, "hello"},
+		{"empty input", "", 10, ""},
+		{"ascii truncate", "abcdefgh", 5, "abcde"},
+		{"utf8 boundary backup mid-rune", "你好世界", 5, "你"},
+		{"utf8 boundary backup on boundary", "你好世界", 6, "你好"},
+		{"utf8 backup lands on valid boundary", "你好世界", 7, "你好"},
+		{"utf8 backup multiple bytes", "日本語テスト", 7, "日本"},
+		{"all invalid bytes", string([]byte{0xff, 0xfe, 0xfd}), 2, ""},
+		{"input contains valid U+FFFD", "ab\ufffdcd", 5, "ab\ufffd"},
+		{"mixed ascii and multibyte", "abc你好", 4, "abc"},
+		{"max zero", "abc", 0, ""},
+		{"long ascii beyond max", strings.Repeat("x", 1000), maxSearchLength, strings.Repeat("x", maxSearchLength)},
+		{"long multibyte beyond max", strings.Repeat("你", 500), maxSearchLength, strings.Repeat("你", maxSearchLength/3)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateSearch(tc.in, tc.max)
+			assert.Equal(t, tc.want, got)
+			assert.True(t, utf8.ValidString(got), "output must be valid UTF-8")
+			assert.LessOrEqual(t, len(got), tc.max, "output byte length must not exceed max")
+			// Must be a prefix of the original (in bytes).
+			assert.True(t, strings.HasPrefix(tc.in, got), "output must be a byte prefix of input")
+		})
+	}
 }

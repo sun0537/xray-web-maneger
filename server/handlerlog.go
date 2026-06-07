@@ -9,16 +9,44 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"xray-web-manager/middleware"
 )
 
 const (
-	logDefaultLines = 500
-	logMaxLines     = 2000
-	logMaxFileSize  = 10 * 1024 * 1024
-	logTimeout      = 10 * time.Second
+	logDefaultLines   = 500
+	logMaxLines       = 2000
+	logMaxFileSize    = 10 * 1024 * 1024
+	logTimeout        = 10 * time.Second
+	maxSearchLength   = 256
 )
+
+// truncateSearch caps the byte length of a user-supplied search string and
+// backs up past any incomplete trailing UTF-8 rune so the result is always
+// valid UTF-8. Returns the (possibly shortened) string unchanged when it
+// already fits within maxBytes.
+func truncateSearch(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	s = s[:maxBytes]
+	// If the cut happened at a rune boundary, we're already valid.
+	if utf8.ValidString(s) {
+		return s
+	}
+	// Otherwise back up past incomplete trailing rune(s). DecodeLastRuneInString
+	// reports size>1 for the leading byte of an incomplete sequence, so we
+	// drop the whole incomplete sequence in one step.
+	for len(s) > 0 {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+		if utf8.ValidString(s) {
+			break
+		}
+	}
+	return s
+}
 
 type logResponse struct {
 	Lines  []string `json:"lines"`
@@ -44,7 +72,7 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		maxLines = logMaxLines
 	}
 
-	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	search := truncateSearch(strings.TrimSpace(r.URL.Query().Get("search")), maxSearchLength)
 
 	ctx, cancel := context.WithTimeout(r.Context(), logTimeout)
 	defer cancel()

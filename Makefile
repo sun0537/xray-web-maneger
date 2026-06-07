@@ -74,8 +74,10 @@ $(RELEASE_DIR)/$(APP_NAME)-$(VERSION)-linux-%.tar.gz:
 	$(eval GOARCH := $*)
 	$(eval PKG_NAME := $(APP_NAME)-$(VERSION)-$(GOOS)-$(GOARCH))
 	$(eval STAGING_DIR := $(BUILD_TEMP_DIR)/$(PKG_NAME))
+	$(eval CGO := $(if $(filter 386,$*),0,1))
+	$(eval BTAGS := $(if $(filter 386,$*),-tags nojournal,))
 	@mkdir -p $(STAGING_DIR)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=1 go build $(LDFLAGS) -o $(STAGING_DIR)/$(APP_NAME) .
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=$(CGO) go build $(LDFLAGS) $(BTAGS) -o $(STAGING_DIR)/$(APP_NAME) .
 	cp $(ASSETS) $(STAGING_DIR)/
 	chmod +x $(STAGING_DIR)/$(APP_NAME)
 	@if command -v upx >/dev/null 2>&1; then \

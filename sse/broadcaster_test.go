@@ -1,7 +1,9 @@
 package sse
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -70,6 +72,11 @@ func TestBroadcasterEnrichFn(t *testing.T) {
 	}
 }
 
+// dedupWaitDuration is how long we wait to confirm a duplicate broadcast was
+// suppressed. It must be longer than the broadcaster's tick interval (50ms)
+// so at least one tick fires during the wait.
+const dedupWaitDuration = 200 * time.Millisecond
+
 func TestBroadcasterDedup(t *testing.T) {
 	b := NewBroadcaster(func() (any, error) {
 		return RawEvent{JSON: []byte(`{"same":true}`)}, nil
@@ -88,7 +95,7 @@ func TestBroadcasterDedup(t *testing.T) {
 	select {
 	case <-ch:
 		t.Fatal("duplicate data should have been deduped")
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(dedupWaitDuration):
 	}
 }
 
@@ -178,5 +185,56 @@ func TestBroadcasterSubscribeAfterStop(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout: expected closed channel")
+	}
+}
+
+func TestBroadcasterWarnOnceOnNonRawEvent(t *testing.T) {
+	// Capture log output.
+	var logBuf bytes.Buffer
+	origFlags := log.Flags()
+	origOutput := log.Writer()
+	log.SetFlags(0)
+	log.SetOutput(&logBuf)
+	defer func() {
+		log.SetFlags(origFlags)
+		log.SetOutput(origOutput)
+	}()
+
+	var fetchCount atomic.Int32
+	b := NewBroadcaster(func() (any, error) {
+		fetchCount.Add(1)
+		// Intentionally NOT a RawEvent to trigger the type warning.
+		return map[string]int{"n": int(fetchCount.Load())}, nil
+	}, nil, 40*time.Millisecond)
+	defer b.Stop()
+
+	ch := b.Subscribe()
+	defer b.Unsubscribe(ch)
+
+	// First broadcast must arrive (non-RawEvent still broadcasts unconditionally).
+	select {
+	case payload := <-ch:
+		if _, ok := payload.(map[string]int); !ok {
+			t.Fatalf("expected map[string]int, got %T", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first broadcast")
+	}
+
+	// Wait for several more ticks so warnOnce has multiple chances to (not) fire.
+	for i := 0; i < 3; i++ {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for subsequent broadcast")
+		}
+	}
+
+	logStr := logBuf.String()
+	if !bytes.Contains([]byte(logStr), []byte("Broadcaster fetchFn 返回非 RawEvent 类型")) {
+		t.Fatalf("expected type warning in log, got: %q", logStr)
+	}
+	if count := bytes.Count([]byte(logStr), []byte("Broadcaster fetchFn 返回非 RawEvent 类型")); count != 1 {
+		t.Fatalf("expected warn-once to fire exactly once, got %d occurrences in log:\n%s", count, logStr)
 	}
 }
