@@ -30,6 +30,13 @@ func CheckOrigin(allowedOrigins []string) func(http.Handler) http.Handler {
 				}
 			}
 
+			// Browsers send "null" Origin for privacy-sensitive contexts
+			// (file://, sandboxed iframes, redirects from HTTPS to HTTP).
+			// Treat it as missing — allow safe methods, block state changes.
+			if origin == "null" {
+				origin = ""
+			}
+
 			if origin == "" {
 				switch r.Method {
 				case http.MethodGet, http.MethodHead, http.MethodOptions:

@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +30,16 @@ func (lrw *loggingResponseWriter) Flush() {
 
 func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
 	return lrw.ResponseWriter
+}
+
+// Hijack implements http.Hijacker so the logger wrapper doesn't break
+// WebSocket upgrades or other hijacking protocols. Delegates to the
+// underlying writer if it supports hijacking.
+func (lrw *loggingResponseWriter) Hijack() (c net.Conn, brw *bufio.ReadWriter, err error) {
+	if hj, ok := lrw.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 }
 
 type ctxKey struct{}

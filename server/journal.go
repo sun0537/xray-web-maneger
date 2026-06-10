@@ -30,7 +30,7 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 
 	searchLower := strings.ToLower(search)
 	lines := make([]string, 0, maxLines)
-	totalBytes := 0
+	var totalBytes int64
 	truncated := false
 
 	for len(lines) < maxLines {
@@ -77,13 +77,13 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 		// a truncation marker is only prepended when older lines were
 		// actually removed.
 		if maxBytes > 0 {
-			totalBytes += len(line)
+			totalBytes += int64(len(line))
 			origLen := len(lines)
-			for int64(totalBytes) > maxBytes && len(lines) > 1 {
-				totalBytes -= len(lines[0])
+			for totalBytes > maxBytes && len(lines) > 1 {
+				totalBytes -= int64(len(lines[0]))
 				lines = lines[1:]
 			}
-			if len(lines) < origLen && int64(totalBytes) <= maxBytes {
+			if len(lines) < origLen && totalBytes <= maxBytes {
 				truncated = true
 			}
 			// Single line exceeds limit: kept as-is without marker,

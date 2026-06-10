@@ -111,16 +111,13 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 	st, tracked := a.states[ip]
 	if !tracked {
 		if len(a.states) >= maxTrackedAuthIPs {
-			// Evict the entry with the oldest lastAttempt to make room.
-			var oldestIP string
-			var oldestTime time.Time
-			for k, v := range a.states {
-				if oldestIP == "" || v.lastAttempt.Before(oldestTime) {
-					oldestIP = k
-					oldestTime = v.lastAttempt
-				}
+			// Evict a random entry to make room. True LRU eviction would
+			// require O(n) scan; random eviction is O(1) and good enough
+			// for a security rate limiter where the exact victim doesn't matter.
+			for k := range a.states {
+				delete(a.states, k)
+				break
 			}
-			delete(a.states, oldestIP)
 		}
 		st = &authState{}
 		a.states[ip] = st
