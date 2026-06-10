@@ -170,83 +170,97 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
-	stats := StatsData{}
+	// Use singleflight to coalesce concurrent requests for the same stats
+	// data. The closure deliberately ignores the caller's ctx for the gRPC
+	// child contexts: if that request disconnects before the gRPC calls
+	// return, its ctx would cancel the in-flight probe and poison all
+	// waiters. Use s.backgroundContext() instead so the coalesced probe
+	// survives.
+	v, err, _ := s.statsGroup.Do(combinedStatsGroupKey, func() (any, error) {
+		stats := StatsData{}
 
-	var (
-		wg            sync.WaitGroup
-		queryResp     *statspb.QueryStatsResponse
-		sysResp       *statspb.SysStatsResponse
-		outboundStats []OutboundStatusData
-		queryErr      error
-		sysErr        error
-	)
+		var (
+			wg            sync.WaitGroup
+			queryResp     *statspb.QueryStatsResponse
+			sysResp       *statspb.SysStatsResponse
+			outboundStats []OutboundStatusData
+			queryErr      error
+			sysErr        error
+		)
 
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		ctx, cancel := context.WithTimeout(ctx, grpcTimeout)
-		defer cancel()
-		queryResp, queryErr = s.statsClient.QueryStats(ctx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
-	}()
-	go func() {
-		defer wg.Done()
-		ctx, cancel := context.WithTimeout(ctx, grpcTimeout)
-		defer cancel()
-		sysResp, sysErr = s.statsClient.GetSysStats(ctx, &statspb.SysStatsRequest{})
-	}()
-	go func() {
-		defer wg.Done()
-		ctx, cancel := context.WithTimeout(ctx, grpcTimeout)
-		defer cancel()
-		outboundStats = s.getAllOutboundStatuses(ctx)
-	}()
-	wg.Wait()
+		grpcCtx, grpcCancel := context.WithTimeout(s.backgroundContext(), grpcTimeout)
+		defer grpcCancel()
 
-	failedSources := 0
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			queryResp, queryErr = s.statsClient.QueryStats(grpcCtx, &statspb.QueryStatsRequest{Pattern: "inbound", Reset_: false})
+		}()
+		go func() {
+			defer wg.Done()
+			sysResp, sysErr = s.statsClient.GetSysStats(grpcCtx, &statspb.SysStatsRequest{})
+		}()
+		go func() {
+			defer wg.Done()
+			outboundStats = s.getAllOutboundStatuses(grpcCtx)
+		}()
+		wg.Wait()
 
-	if queryErr != nil {
-		if errors.Is(queryErr, context.Canceled) {
-			return stats, queryErr
-		}
-		log.Printf("QueryStats 错误 [inbound流量统计]: %v", queryErr)
-		stats.Degraded = true
-		failedSources++
-	} else if queryResp != nil {
-		for _, stat := range queryResp.Stat {
-			if strings.HasSuffix(stat.Name, ">>>traffic>>>uplink") {
-				stats.Uplink += stat.Value
-			} else if strings.HasSuffix(stat.Name, ">>>traffic>>>downlink") {
-				stats.Downlink += stat.Value
+		failedSources := 0
+
+		if queryErr != nil {
+			if errors.Is(queryErr, context.Canceled) {
+				return StatsData{}, queryErr
+			}
+			log.Printf("QueryStats 错误 [inbound流量统计]: %v", queryErr)
+			stats.Degraded = true
+			failedSources++
+		} else if queryResp != nil {
+			for _, stat := range queryResp.Stat {
+				if strings.HasSuffix(stat.Name, ">>>traffic>>>uplink") {
+					stats.Uplink += stat.Value
+				} else if strings.HasSuffix(stat.Name, ">>>traffic>>>downlink") {
+					stats.Downlink += stat.Value
+				}
 			}
 		}
-	}
 
-	if sysErr != nil {
-		if errors.Is(sysErr, context.Canceled) {
-			return stats, sysErr
+		if sysErr != nil {
+			if errors.Is(sysErr, context.Canceled) {
+				return StatsData{}, sysErr
+			}
+			log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
+			stats.Degraded = true
+			failedSources++
+		} else if sysResp != nil {
+			stats.Uptime = int64(sysResp.GetUptime())
+			stats.SysMem = sysResp.GetSys()
+			stats.Goroutines = int(sysResp.GetNumGoroutine())
 		}
-		log.Printf("GetSysStats 错误 [系统统计]: %v", sysErr)
-		stats.Degraded = true
-		failedSources++
-	} else if sysResp != nil {
-		stats.Uptime = int64(sysResp.GetUptime())
-		stats.SysMem = sysResp.GetSys()
-		stats.Goroutines = int(sysResp.GetNumGoroutine())
-	}
 
-	if outboundStats == nil {
-		stats.Outbounds = []OutboundStatusData{}
-	} else {
-		stats.Outbounds = outboundStats
-	}
+		if outboundStats == nil {
+			stats.Outbounds = []OutboundStatusData{}
+		} else {
+			stats.Outbounds = outboundStats
+		}
 
-	// After Task 1 fix: only query and sys sources count as "failure" because
-	// observatory returning nil means "no data" (not an error). The cached
-	// Outbounds empty-slice path keeps the JSON shape stable.
-	if failedSources >= 2 {
-		return stats, fmt.Errorf("all data sources failed")
+		// Only query and sys sources count as "failure" because observatory
+		// returning nil means "no data" (not an error). The cached
+		// Outbounds empty-slice path keeps the JSON shape stable.
+		if failedSources >= 2 {
+			return StatsData{}, fmt.Errorf("all data sources failed")
+		}
+		return stats, nil
+	})
+
+	if err != nil {
+		return StatsData{}, err
 	}
-	return stats, nil
+	data, ok := v.(StatsData)
+	if !ok {
+		return StatsData{}, fmt.Errorf("combined-stats: unexpected singleflight value type %T", v)
+	}
+	return data, nil
 }
 
 // computeBPS enriches a StatsData payload with upload/download BPS values

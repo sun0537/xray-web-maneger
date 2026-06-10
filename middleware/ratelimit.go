@@ -15,10 +15,9 @@ type slidingWindow struct {
 
 type rateLimiter struct {
 	sync.Mutex
-	requests     map[string]*slidingWindow
-	limit        int
-	window       time.Duration
-	cleanupCount int
+	requests map[string]*slidingWindow
+	limit    int
+	window   time.Duration
 }
 
 var limiter = rateLimiter{
@@ -31,7 +30,7 @@ var limiterMu sync.Mutex
 var limiterStarted bool
 var limiterStop chan struct{}
 
-func startRateLimiterCleanup() {
+func InitRateLimiter() {
 	limiterMu.Lock()
 	defer limiterMu.Unlock()
 	if limiterStarted {
@@ -49,12 +48,7 @@ func startRateLimiterCleanup() {
 				return
 			case <-ticker.C:
 				limiter.Lock()
-				now := time.Now()
-				for ip, sw := range limiter.requests {
-					if now.Sub(sw.windowStart) > limiter.window*2 {
-						delete(limiter.requests, ip)
-					}
-				}
+				limiter.cleanupStaleKeys(time.Now())
 				limiter.Unlock()
 			}
 		}
@@ -62,12 +56,16 @@ func startRateLimiterCleanup() {
 }
 
 // StopCleanup stops both the rate limiter and auth limiter cleanup goroutines.
+// It also resets the "started" flags so a subsequent InitRateLimiter /
+// startAuthLimiterCleanup call (e.g. in tests) can restart the goroutines
+// cleanly instead of being a no-op.
 func StopCleanup() {
 	limiterMu.Lock()
 	if limiterStop != nil {
 		close(limiterStop)
 		limiterStop = nil
 	}
+	limiterStarted = false
 	limiterMu.Unlock()
 
 	authCleanupMu.Lock()
@@ -75,11 +73,11 @@ func StopCleanup() {
 		close(authCleanupStop)
 		authCleanupStop = nil
 	}
+	authCleanupStarted = false
 	authCleanupMu.Unlock()
 }
 
 func RateLimit(trustProxy bool, next http.Handler) http.Handler {
-	startRateLimiterCleanup()
 	return limiter.middleware(trustProxy, next)
 }
 
@@ -134,14 +132,7 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	if effective >= float64(rl.limit) {
 		return false
 	}
-
 	sw.currCount++
-
-	rl.cleanupCount++
-	if rl.cleanupCount >= 100 {
-		rl.cleanupStaleKeys(now)
-		rl.cleanupCount = 0
-	}
 	return true
 }
 

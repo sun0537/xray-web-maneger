@@ -99,12 +99,14 @@ func TestAuthStateRespectsMaxTrackedIPs(t *testing.T) {
 	al.Unlock()
 	assert.Equal(t, maxTrackedAuthIPs, size, "limiter must be filled to its cap")
 
-	// One more unique IP must be dropped (the "if !tracked && size >= cap" branch).
+	// One more unique IP: the oldest entry is evicted to make room.
 	al.recordAuthFailure("overflow-ip")
 	al.Lock()
 	_, present := al.states["overflow-ip"]
+	sizeAfter := len(al.states)
 	al.Unlock()
-	assert.False(t, present, "new IPs beyond the cap must be silently dropped")
+	assert.True(t, present, "new IPs beyond the cap must be tracked (oldest evicted)")
+	assert.Equal(t, maxTrackedAuthIPs, sizeAfter, "map size must stay at cap after eviction")
 }
 
 func TestAuthStateIsAuthBlockedUnknownIP(t *testing.T) {

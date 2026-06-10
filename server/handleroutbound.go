@@ -157,6 +157,7 @@ func validateOutboundTag(tag string) error {
 	if len(tag) > 256 {
 		return fmt.Errorf("出站标签过长")
 	}
+	// Empty tag resets the balancer override, restoring auto mode.
 	if tag == "" {
 		return nil
 	}

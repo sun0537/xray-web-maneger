@@ -31,6 +31,7 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 	searchLower := strings.ToLower(search)
 	lines := make([]string, 0, maxLines)
 	totalBytes := 0
+	truncated := false
 
 	for len(lines) < maxLines {
 		select {
@@ -67,16 +68,35 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 			line = msg
 		}
 
-		totalBytes += len(line)
-		if int64(totalBytes) > maxBytes {
-			lines = append(lines, "[日志输出过大，已截断]")
-			break
-		}
 		lines = append(lines, line)
+
+		// Enforce maxBytes when set (>0); keep the most-recent lines that
+		// fit within the limit, matching readLogFile's behaviour.  When the
+		// limit is exceeded, remove the oldest (lowest-index) lines until
+		// the total fits.  At least the just-appended line is always kept;
+		// a truncation marker is only prepended when older lines were
+		// actually removed.
+		if maxBytes > 0 {
+			totalBytes += len(line)
+			origLen := len(lines)
+			for int64(totalBytes) > maxBytes && len(lines) > 1 {
+				totalBytes -= len(lines[0])
+				lines = lines[1:]
+			}
+			if len(lines) < origLen && int64(totalBytes) <= maxBytes {
+				truncated = true
+			}
+			// Single line exceeds limit: kept as-is without marker,
+			// matching readLogFile's single-line-exceeds-maxBytes path.
+		}
 	}
 
 	for left, right := 0, len(lines)-1; left < right; left, right = left+1, right-1 {
 		lines[left], lines[right] = lines[right], lines[left]
+	}
+
+	if truncated {
+		lines = append([]string{"[日志输出过大，已截断]"}, lines...)
 	}
 
 	return lines, nil
