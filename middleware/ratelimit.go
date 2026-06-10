@@ -13,6 +13,10 @@ type slidingWindow struct {
 	windowStart time.Time
 }
 
+// maxTrackedRateIPs caps the number of unique IPs tracked for rate limiting,
+// preventing unbounded memory growth from distributed attacks.
+const maxTrackedRateIPs = 10_000
+
 type rateLimiter struct {
 	sync.Mutex
 	requests map[string]*slidingWindow
@@ -106,6 +110,9 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	sw, exists := rl.requests[ip]
 
 	if !exists {
+		if len(rl.requests) >= maxTrackedRateIPs {
+			rl.evictOldest()
+		}
 		rl.requests[ip] = &slidingWindow{currCount: 1, windowStart: now}
 		return true
 	}
@@ -141,5 +148,22 @@ func (rl *rateLimiter) cleanupStaleKeys(now time.Time) {
 		if now.Sub(sw.windowStart) > rl.window*2 {
 			delete(rl.requests, ip)
 		}
+	}
+}
+
+// evictOldest removes the entry with the oldest windowStart to make room.
+// Uses a linear scan which is acceptable given the infrequent call path
+// (only when the map is at capacity) and the bounded map size.
+func (rl *rateLimiter) evictOldest() {
+	var oldestIP string
+	var oldestTime time.Time
+	for ip, sw := range rl.requests {
+		if oldestIP == "" || sw.windowStart.Before(oldestTime) {
+			oldestIP = ip
+			oldestTime = sw.windowStart
+		}
+	}
+	if oldestIP != "" {
+		delete(rl.requests, oldestIP)
 	}
 }

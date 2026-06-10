@@ -229,6 +229,7 @@ function connectStatsSSE() {
             if (reconnectTimer) return;
             evtSource.close();
             evtSource = null;
+            _sseEventSource = null;
             retryCount++;
             if (retryCount >= maxRetries) {
                 showPermanentDisconnect();

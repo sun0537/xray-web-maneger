@@ -36,6 +36,7 @@ type Server struct {
 	statsGroup        singleflight.Group
 	healthMu          sync.RWMutex
 	healthCache       cachedHealth
+	backgroundWg      sync.WaitGroup // tracks background goroutines for graceful shutdown
 }
 
 // NewServer creates a new Server instance.
@@ -81,6 +82,8 @@ func (s *Server) Shutdown() {
 	s.broadcaster.Stop()
 	log.Println("正在关闭 SSE 管理器...")
 	s.sseManager.CloseAll()
+	log.Println("正在等待后台 goroutine 退出...")
+	s.backgroundWg.Wait()
 }
 
 // backgroundContext returns a context that is independent of any single
@@ -105,7 +108,9 @@ const (
 
 // StartReconnectMonitor monitors gRPC connection state and reconnects on failure.
 func (s *Server) StartReconnectMonitor(conn *grpc.ClientConn) {
+	s.backgroundWg.Add(1)
 	go func() {
+		defer s.backgroundWg.Done()
 		ticker := time.NewTicker(reconnectMonitorInterval)
 		defer ticker.Stop()
 

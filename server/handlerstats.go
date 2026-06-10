@@ -280,10 +280,12 @@ func computeBPS(data, prev any, tickAt, prevAt time.Time) any {
 
 	curr.UplinkBPS = float64(curr.Uplink-last.Uplink) / elapsed
 	if curr.UplinkBPS < 0 {
+		log.Printf("警告: 上行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.UplinkBPS)
 		curr.UplinkBPS = 0
 	}
 	curr.DownlinkBPS = float64(curr.Downlink-last.Downlink) / elapsed
 	if curr.DownlinkBPS < 0 {
+		log.Printf("警告: 下行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.DownlinkBPS)
 		curr.DownlinkBPS = 0
 	}
 

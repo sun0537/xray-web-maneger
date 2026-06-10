@@ -3,6 +3,7 @@ package sse
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -159,6 +160,11 @@ const maxConsecutiveErrors = 3
 
 func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 	defer close(loopDone)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("严重: 广播器循环 panic: %v", r)
+		}
+	}()
 
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
@@ -173,7 +179,14 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 			return
 		case <-ticker.C:
 			tickAt := time.Now()
-			data, err := b.fetchFn()
+			data, err := func() (result any, err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("fetchFn panic: %v", r)
+					}
+				}()
+				return b.fetchFn()
+			}()
 			if err != nil {
 				consecutiveErrors++
 				log.Printf("警告: 统计数据获取失败 (连续第%d次): %v", consecutiveErrors, err)
