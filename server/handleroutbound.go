@@ -47,6 +47,10 @@ func (s *Server) handleGetOutbounds(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, errorMsg, http.StatusInternalServerError, "server")
 		return
 	}
+	if resp == nil {
+		jsonError(w, "收到空的出站列表响应", http.StatusBadGateway, "bad_gateway")
+		return
+	}
 
 	outbounds := make([]OutboundInfo, 0, len(resp.Outbounds))
 	for _, outbound := range resp.Outbounds {
@@ -103,6 +107,10 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 		errorMsg := fmt.Sprintf("获取负载均衡器信息失败: %v", err)
 		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %s", s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusBadGateway, "bad_gateway")
+		return
+	}
+	if resp == nil {
+		jsonError(w, "收到空的负载均衡器响应", http.StatusBadGateway, "bad_gateway")
 		return
 	}
 

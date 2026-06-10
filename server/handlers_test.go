@@ -701,7 +701,7 @@ func TestGetCombinedStats(t *testing.T) {
 				{OutboundTag: "node-1", Alive: true, Delay: 50},
 			}},
 		}
-		stats, err := s.getCombinedStats(context.Background())
+		stats, err := s.getCombinedStats()
 		assert.NoError(t, err)
 		assert.Equal(t, int64(1024), stats.Uplink)
 		assert.Equal(t, int64(2048), stats.Downlink)
@@ -719,7 +719,7 @@ func TestGetCombinedStats(t *testing.T) {
 				{OutboundTag: "node-1", Alive: true, Delay: 50},
 			}},
 		}
-		stats, err := s.getCombinedStats(context.Background())
+		stats, err := s.getCombinedStats()
 		assert.NoError(t, err)
 		assert.True(t, stats.Degraded)
 		assert.Equal(t, int64(0), stats.Uplink)
@@ -733,7 +733,7 @@ func TestGetCombinedStats(t *testing.T) {
 				{OutboundTag: "node-1", Alive: true, Delay: 50},
 			}},
 		}
-		stats, err := s.getCombinedStats(context.Background())
+		stats, err := s.getCombinedStats()
 		assert.NoError(t, err)
 		assert.True(t, stats.Degraded)
 		assert.Equal(t, int64(1024), stats.Uplink)
@@ -745,7 +745,7 @@ func TestGetCombinedStats(t *testing.T) {
 			statsClient:       &MockStatsClient{},
 			observatoryClient: &mockObservatoryClientError{},
 		}
-		stats, err := s.getCombinedStats(context.Background())
+		stats, err := s.getCombinedStats()
 		assert.NoError(t, err)
 		assert.Equal(t, int64(1024), stats.Uplink)
 		assert.NotNil(t, stats.Outbounds)
@@ -757,20 +757,21 @@ func TestGetCombinedStats(t *testing.T) {
 			statsClient:       &mockStatsClientWithError{queryErr: fmt.Errorf("q"), sysErr: fmt.Errorf("s")},
 			observatoryClient: &mockObservatoryClientError{},
 		}
-		_, err := s.getCombinedStats(context.Background())
+		_, err := s.getCombinedStats()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "all data sources failed")
 	})
 
-	t.Run("Context cancelled — returns early", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+	t.Run("Shutdown context cancelled — returns early", func(t *testing.T) {
+		shutdownCtx, cancel := context.WithCancel(context.Background())
 		cancel()
 		s := &Server{
 			statsClient:       &MockStatsClient{},
 			observatoryClient: &mockObservatoryClient{},
+			shutdownCtx:       shutdownCtx,
 		}
 		// With fast mocks, the goroutines may complete before the context
 		// deadline is checked, so we just verify no panic occurs.
-		s.getCombinedStats(ctx)
+		s.getCombinedStats()
 	})
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +40,8 @@ type Broadcaster struct {
 
 	lastMu        sync.RWMutex
 	lastBroadcast any
+
+	droppedMsgs atomic.Int64
 }
 
 // broadcasterIdleTimeout is how long the polling loop stays alive after the
@@ -104,7 +107,7 @@ func (b *Broadcaster) Stop() {
 // If this is the first subscriber and the loop is not running, the background
 // polling loop starts. Call Unsubscribe when done to clean up.
 func (b *Broadcaster) Subscribe() chan any {
-	ch := make(chan any, 1)
+	ch := make(chan any, 5)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -229,9 +232,14 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 				select {
 				case ch <- broadcast:
 				default:
+					b.droppedMsgs.Add(1)
 				}
 			}
 			b.mu.Unlock()
+
+			if dropped := b.droppedMsgs.Swap(0); dropped > 0 {
+				log.Printf("警告: SSE 广播丢弃了 %d 条消息 (订阅者 channel 已满)", dropped)
+			}
 		}
 	}
 }

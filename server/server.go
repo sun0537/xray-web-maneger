@@ -54,7 +54,7 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 	}
 
 	s.broadcaster = sse.NewBroadcaster(func() (any, error) {
-		return s.getCombinedStats(s.shutdownCtx)
+		return s.getCombinedStats()
 	}, computeBPS, sseUpdateInterval)
 
 	return s
