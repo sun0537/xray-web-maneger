@@ -111,19 +111,19 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 //   - pos is the index where the NEXT line will be written (0..maxLines-1)
 //   - count tracks total lines written (used to detect whether the buffer wrapped)
 func readLogFile(ctx context.Context, filePath string, maxLines int, search string, maxBytes int64) ([]string, error) {
-	info, err := os.Stat(filePath)
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if info.Size() > logMaxFileSize {
 		return nil, &fileTooLargeError{size: info.Size()}
 	}
-
-	f, err := os.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
 
 	ring := make([]string, maxLines)
 	pos := 0
@@ -165,23 +165,20 @@ func readLogFile(ctx context.Context, filePath string, maxLines int, search stri
 
 	// Enforce maxBytes: keep most-recent lines that fit within the limit.
 	// Walk backwards from the newest line, counting only kept bytes.
-	if maxBytes > 0 {
+	if maxBytes > 0 && len(result) > 0 {
 		var total int64
 		kept := len(result)
+		exceeded := false
 		for i := len(result) - 1; i >= 0; i-- {
 			lineBytes := int64(len(result[i]))
 			if total+lineBytes > maxBytes {
+				exceeded = true
 				break
 			}
 			total += lineBytes
 			kept = i
 		}
-		// Clamp to keep at least the most recent line, even if it alone
-		// exceeds maxBytes (avoids discarding everything).
-		if kept >= len(result) {
-			kept = len(result) - 1
-		}
-		if kept > 0 {
+		if exceeded && kept > 0 && kept < len(result) {
 			truncated := make([]string, 0, len(result)-kept+1)
 			truncated = append(truncated, "[日志输出过大，已截断]")
 			truncated = append(truncated, result[kept:]...)

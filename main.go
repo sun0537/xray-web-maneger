@@ -122,9 +122,9 @@ func main() {
 	server.RegisterFrontend(mainMux, *devMode, frontendFS)
 
 	var finalHandler http.Handler = mainMux
-	finalHandler = middleware.SecurityHeaders(finalHandler)
 	finalHandler = middleware.RateLimit(cfg.Server.TrustProxyHeaders, finalHandler)
 	finalHandler = middleware.BasicAuth(cfg.Auth.Username, cfg.Auth.Password)(finalHandler)
+	finalHandler = middleware.SecurityHeaders(finalHandler)
 	finalHandler = middleware.Logger(cfg.Server.TrustProxyHeaders, finalHandler)
 	finalHandler = middleware.Recovery(finalHandler)
 

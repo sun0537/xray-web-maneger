@@ -109,7 +109,7 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if initialJSON == nil {
-		stats, statsErr := s.getCombinedStats(connCtx)
+		stats, statsErr := s.getCombinedStats()
 		if statsErr != nil {
 			if !errors.Is(statsErr, context.Canceled) {
 				log.Printf("SSE 初始数据获取失败，发送降级数据: %v", statsErr)
@@ -169,13 +169,10 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) getCombinedStats(ctx context.Context) (StatsData, error) {
+func (s *Server) getCombinedStats() (StatsData, error) {
 	// Use singleflight to coalesce concurrent requests for the same stats
-	// data. The closure deliberately ignores the caller's ctx for the gRPC
-	// child contexts: if that request disconnects before the gRPC calls
-	// return, its ctx would cancel the in-flight probe and poison all
-	// waiters. Use s.backgroundContext() instead so the coalesced probe
-	// survives.
+	// data. Use s.backgroundContext() for gRPC calls so the coalesced
+	// probe survives even if the caller disconnects.
 	v, err, _ := s.statsGroup.Do(combinedStatsGroupKey, func() (any, error) {
 		stats := StatsData{}
 
