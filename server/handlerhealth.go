@@ -30,7 +30,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 
 	xrayStatus := cached.status
 	if time.Since(cached.timestamp) > 10*time.Second {
-		result, err, _ := s.healthGroup.Do(healthGroupKey, func() (interface{}, error) {
+		result, err, _ := s.healthGroup.Do(healthGroupKey, func() (any, error) {
 			s.healthMu.RLock()
 			fresh := s.healthCache
 			s.healthMu.RUnlock()
@@ -54,7 +54,8 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 			cacheTime := time.Now()
 			if err != nil {
 				log.Printf("健康检查: Xray gRPC 不可达: %v", err)
-				cacheTime = cacheTime.Add(-7 * time.Second)
+				// 健康检查失败时缩短缓存有效期至 3 秒 (10-7)，以便更快重试。
+				cacheTime = time.Now().Add(-7 * time.Second)
 			}
 			s.healthMu.Lock()
 			s.healthCache = cachedHealth{status: xrayStatus, timestamp: cacheTime}

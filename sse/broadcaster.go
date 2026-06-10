@@ -69,8 +69,6 @@ func (b *Broadcaster) LastBroadcast() any {
 	return b.lastBroadcast
 }
 
-
-
 // Stop shuts down the background loop (if running) and closes all subscriber channels.
 func (b *Broadcaster) Stop() {
 	b.stopOnce.Do(func() {

@@ -27,27 +27,26 @@ import (
 //go:embed frontend/index.html frontend/core.js frontend/network.js frontend/features.js frontend/style.css
 var frontendFS embed.FS
 
-const readyPollInterval = 200 * time.Millisecond
-
-// waitForReady polls the gRPC connection state until it reaches Ready,
-// TransientFailure, or the timeout expires. Returns true if Ready.
+// waitForReady waits for the gRPC connection to reach Ready or
+// TransientFailure, or for the timeout to expire. Returns true if Ready.
+// Uses grpc.ClientConn.WaitForStateChange, which is event-driven and avoids
+// the timer/ticker noise of a manual poll loop. On ctx cancel/timeout the
+// current state is logged to help diagnose tight startup budgets.
 func waitForReady(conn *grpc.ClientConn, timeout time.Duration) bool {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	poll := time.NewTicker(readyPollInterval)
-	defer poll.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	for {
-		select {
-		case <-timer.C:
+		state := conn.GetState()
+		if state == connectivity.Ready {
+			return true
+		}
+		if state == connectivity.TransientFailure {
 			return false
-		case <-poll.C:
-			state := conn.GetState()
-			if state == connectivity.Ready {
-				return true
-			}
-			if state == connectivity.TransientFailure {
-				return false
-			}
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			log.Printf("waitForReady: ctx 取消或超时，当前状态=%s", conn.GetState())
+			return false
 		}
 	}
 }
@@ -106,6 +105,8 @@ func main() {
 	}
 
 	log.Println("已创建 gRPC 客户端连接")
+
+	middleware.InitRateLimiter()
 
 	sseMgr := sse.NewManager()
 	srv := server.NewServer(cfg, conn, sseMgr, time.Now())

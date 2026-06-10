@@ -111,7 +111,16 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 	st, tracked := a.states[ip]
 	if !tracked {
 		if len(a.states) >= maxTrackedAuthIPs {
-			return
+			// Evict the entry with the oldest lastAttempt to make room.
+			var oldestIP string
+			var oldestTime time.Time
+			for k, v := range a.states {
+				if oldestIP == "" || v.lastAttempt.Before(oldestTime) {
+					oldestIP = k
+					oldestTime = v.lastAttempt
+				}
+			}
+			delete(a.states, oldestIP)
 		}
 		st = &authState{}
 		a.states[ip] = st

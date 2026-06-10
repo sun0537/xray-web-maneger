@@ -82,7 +82,7 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch cfg.Type {
 	case "file":
-		lines, err = readLogFile(ctx, cfg.FilePath, maxLines, search)
+		lines, err = readLogFile(ctx, cfg.FilePath, maxLines, search, s.config.Log.MaxBytes)
 	case "journal":
 		lines, err = readJournalLog(ctx, cfg.Journal, maxLines, search, s.config.Log.MaxBytes)
 	default:
@@ -110,7 +110,7 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 //   - ring is always exactly maxLines in length once filled
 //   - pos is the index where the NEXT line will be written (0..maxLines-1)
 //   - count tracks total lines written (used to detect whether the buffer wrapped)
-func readLogFile(ctx context.Context, filePath string, maxLines int, search string) ([]string, error) {
+func readLogFile(ctx context.Context, filePath string, maxLines int, search string, maxBytes int64) ([]string, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return nil, err
@@ -153,14 +153,41 @@ func readLogFile(ctx context.Context, filePath string, maxLines int, search stri
 	}
 
 	// Fewer lines than capacity — return the filled portion in order.
+	var result []string
 	if count < maxLines {
-		return ring[:count], nil
+		result = ring[:count]
+	} else {
+		// Buffer wrapped — rotate so oldest line is first.
+		result = make([]string, maxLines)
+		n := copy(result, ring[pos:])
+		copy(result[n:], ring[:pos])
 	}
 
-	// Buffer wrapped — rotate so oldest line is first.
-	result := make([]string, maxLines)
-	n := copy(result, ring[pos:])
-	copy(result[n:], ring[:pos])
+	// Enforce maxBytes: keep most-recent lines that fit within the limit.
+	// Walk backwards from the newest line, counting only kept bytes.
+	if maxBytes > 0 {
+		var total int64
+		kept := len(result)
+		for i := len(result) - 1; i >= 0; i-- {
+			lineBytes := int64(len(result[i]))
+			if total+lineBytes > maxBytes {
+				break
+			}
+			total += lineBytes
+			kept = i
+		}
+		// Clamp to keep at least the most recent line, even if it alone
+		// exceeds maxBytes (avoids discarding everything).
+		if kept >= len(result) {
+			kept = len(result) - 1
+		}
+		if kept > 0 {
+			truncated := make([]string, 0, len(result)-kept+1)
+			truncated = append(truncated, "[日志输出过大，已截断]")
+			truncated = append(truncated, result[kept:]...)
+			result = truncated
+		}
+	}
 	return result, nil
 }
 

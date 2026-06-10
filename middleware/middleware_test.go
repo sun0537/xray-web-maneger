@@ -144,7 +144,6 @@ func captureLog(f func()) string {
 func resetLimiter() {
 	limiter.Lock()
 	limiter.requests = make(map[string]*slidingWindow)
-	limiter.cleanupCount = 0
 	limiter.Unlock()
 }
 

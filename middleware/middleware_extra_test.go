@@ -291,14 +291,13 @@ func TestRateLimitTrustProxy(t *testing.T) {
 }
 
 func TestStopCleanup(t *testing.T) {
-	startRateLimiterCleanup()
+	InitRateLimiter()
 	startAuthLimiterCleanup()
 
 	StopCleanup()
 
 	assert.Nil(t, limiterStop)
 	assert.Nil(t, authCleanupStop)
-
-	limiterStarted = false
-	authCleanupStarted = false
+	assert.False(t, limiterStarted)
+	assert.False(t, authCleanupStarted)
 }

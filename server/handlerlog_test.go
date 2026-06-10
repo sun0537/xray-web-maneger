@@ -29,7 +29,7 @@ func TestReadLogFile(t *testing.T) {
 	t.Run("Read all lines", func(t *testing.T) {
 		path := writeTestLog(t, []string{"line1", "line2", "line3"})
 
-		lines, err := readLogFile(context.Background(), path, 100, "")
+		lines, err := readLogFile(context.Background(), path, 100, "", 0)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"line1", "line2", "line3"}, lines)
 	})
@@ -37,7 +37,7 @@ func TestReadLogFile(t *testing.T) {
 	t.Run("Respects maxLines ring buffer", func(t *testing.T) {
 		path := writeTestLog(t, []string{"a", "b", "c", "d", "e"})
 
-		lines, err := readLogFile(context.Background(), path, 3, "")
+		lines, err := readLogFile(context.Background(), path, 3, "", 0)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"c", "d", "e"}, lines)
 	})
@@ -45,7 +45,7 @@ func TestReadLogFile(t *testing.T) {
 	t.Run("Ring buffer exact capacity", func(t *testing.T) {
 		path := writeTestLog(t, []string{"1", "2", "3"})
 
-		lines, err := readLogFile(context.Background(), path, 3, "")
+		lines, err := readLogFile(context.Background(), path, 3, "", 0)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"1", "2", "3"}, lines)
 	})
@@ -57,7 +57,7 @@ func TestReadLogFile(t *testing.T) {
 		}
 		path := writeTestLog(t, all)
 
-		lines, err := readLogFile(context.Background(), path, 5, "")
+		lines, err := readLogFile(context.Background(), path, 5, "", 0)
 		assert.NoError(t, err)
 		assert.Len(t, lines, 5)
 		assert.Equal(t, "linep", lines[0])
@@ -67,7 +67,7 @@ func TestReadLogFile(t *testing.T) {
 	t.Run("Search filter", func(t *testing.T) {
 		path := writeTestLog(t, []string{"hello world", "foo bar", "hello again"})
 
-		lines, err := readLogFile(context.Background(), path, 100, "hello")
+		lines, err := readLogFile(context.Background(), path, 100, "hello", 0)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"hello world", "hello again"}, lines)
 	})
@@ -75,7 +75,7 @@ func TestReadLogFile(t *testing.T) {
 	t.Run("Search is case-insensitive", func(t *testing.T) {
 		path := writeTestLog(t, []string{"ERROR: something", "info: ok", "error: another"})
 
-		lines, err := readLogFile(context.Background(), path, 100, "error")
+		lines, err := readLogFile(context.Background(), path, 100, "error", 0)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"ERROR: something", "error: another"}, lines)
 	})
@@ -83,7 +83,7 @@ func TestReadLogFile(t *testing.T) {
 	t.Run("Search with maxLines ring buffer", func(t *testing.T) {
 		path := writeTestLog(t, []string{"match1", "skip", "match2", "skip", "match3"})
 
-		lines, err := readLogFile(context.Background(), path, 2, "match")
+		lines, err := readLogFile(context.Background(), path, 2, "match", 0)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"match2", "match3"}, lines)
 	})
@@ -91,13 +91,13 @@ func TestReadLogFile(t *testing.T) {
 	t.Run("Empty file", func(t *testing.T) {
 		path := writeTestLog(t, []string{""})
 
-		lines, err := readLogFile(context.Background(), path, 100, "")
+		lines, err := readLogFile(context.Background(), path, 100, "", 0)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{""}, lines)
 	})
 
 	t.Run("File not found", func(t *testing.T) {
-		_, err := readLogFile(context.Background(), "/nonexistent/path.log", 100, "")
+		_, err := readLogFile(context.Background(), "/nonexistent/path.log", 100, "", 0)
 		assert.Error(t, err)
 	})
 
@@ -107,7 +107,7 @@ func TestReadLogFile(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := readLogFile(ctx, path, 100, "")
+		_, err := readLogFile(ctx, path, 100, "", 0)
 		assert.Error(t, err)
 	})
 }
@@ -123,7 +123,7 @@ func TestReadLogFileMaxFileSize(t *testing.T) {
 	}
 	f.Close()
 
-	_, err := readLogFile(context.Background(), path, 100, "")
+	_, err := readLogFile(context.Background(), path, 100, "", 0)
 	assert.Error(t, err)
 
 	var ftl *fileTooLargeError
@@ -132,6 +132,69 @@ func TestReadLogFileMaxFileSize(t *testing.T) {
 		assert.Contains(t, msg, "日志文件过大")
 		assert.Contains(t, msg, "最大支持")
 	}
+}
+
+func TestReadLogFileMaxBytesTruncation(t *testing.T) {
+	// maxBytes=0 disables truncation (existing tests already cover this).
+	t.Run("maxBytes larger than total — no truncation", func(t *testing.T) {
+		path := writeTestLog(t, []string{"a short line", "another short line"})
+		lines, err := readLogFile(context.Background(), path, 100, "", 1<<20)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"a short line", "another short line"}, lines)
+	})
+
+	t.Run("maxBytes truncates — marker prepended, most-recent lines kept", func(t *testing.T) {
+		// Each line ~12 bytes, maxBytes=20 should keep last 1-2 lines.
+		path := writeTestLog(t, []string{"line 0", "line 1", "line 2", "line 3", "line 4"})
+		lines, err := readLogFile(context.Background(), path, 100, "", 20)
+		assert.NoError(t, err)
+		assert.Greater(t, len(lines), 1, "should have marker + at least one line")
+		assert.Equal(t, "[日志输出过大，已截断]", lines[0], "marker must be first")
+		// The last line ("line 4") should always be present.
+		assert.Equal(t, "line 4", lines[len(lines)-1])
+	})
+
+	t.Run("maxBytes so small only last line fits (multi-line result)", func(t *testing.T) {
+		path := writeTestLog(t, []string{"x", "y", "z"})
+		// maxBytes=3: "z" (1 byte) fits but "y" (1) + "z" (1) = 2 also fits.
+		// maxBytes=1: only "z" fits, "y"+"z"=2 > 1
+		lines, err := readLogFile(context.Background(), path, 100, "", 1)
+		assert.NoError(t, err)
+		assert.Len(t, lines, 2, "marker + last line")
+		assert.Equal(t, "[日志输出过大，已截断]", lines[0])
+		assert.Equal(t, "z", lines[1])
+	})
+
+	t.Run("single line fits within maxBytes", func(t *testing.T) {
+		path := writeTestLog(t, []string{"hello"})
+		lines, err := readLogFile(context.Background(), path, 100, "", 100)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"hello"}, lines)
+	})
+
+	t.Run("single line exceeds maxBytes — still kept, no marker", func(t *testing.T) {
+		path := writeTestLog(t, []string{"a very long single line that exceeds the limit"})
+		lines, err := readLogFile(context.Background(), path, 100, "", 2)
+		assert.NoError(t, err)
+		// Only one line in result, and it alone exceeds maxBytes → clamp
+		// sets kept=0, and kept>0 is false, so line is returned as-is.
+		assert.Equal(t, []string{"a very long single line that exceeds the limit"}, lines)
+	})
+
+	t.Run("maxBytes truncation with ring buffer wrapping", func(t *testing.T) {
+		// 6 lines, maxLines=3 → ring buffer wraps → result is last 3 lines
+		all := make([]string, 6)
+		for i := range all {
+			all[i] = strings.Repeat("x", 20) // 20 bytes each
+		}
+		path := writeTestLog(t, all)
+
+		// maxBytes=25: only the last line (20 bytes) fits. Line-1 (40) > 25.
+		lines, err := readLogFile(context.Background(), path, 3, "", 25)
+		assert.NoError(t, err)
+		assert.Len(t, lines, 2, "marker + one line")
+		assert.Equal(t, "[日志输出过大，已截断]", lines[0])
+	})
 }
 
 func TestHandleGetLogs(t *testing.T) {

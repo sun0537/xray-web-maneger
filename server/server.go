@@ -33,6 +33,7 @@ type Server struct {
 	shutdownCtx       context.Context
 	shutdownCancel    context.CancelFunc
 	healthGroup       singleflight.Group
+	statsGroup        singleflight.Group
 	healthMu          sync.RWMutex
 	healthCache       cachedHealth
 }
@@ -99,6 +100,7 @@ const (
 	reconnectMonitorInterval = 5 * time.Second
 	reconnectRecoveryTimeout = 10 * time.Second
 	healthGroupKey           = "xray-health"
+	combinedStatsGroupKey    = "combined-stats"
 )
 
 // StartReconnectMonitor monitors gRPC connection state and reconnects on failure.
