@@ -81,6 +81,11 @@ func readJournalLog(ctx context.Context, unit string, maxLines int, search strin
 			origLen := len(lines)
 			for totalBytes > maxBytes && len(lines) > 1 {
 				totalBytes -= int64(len(lines[0]))
+				// Clear the element reference before slicing so the old
+				// string can be garbage-collected; lines[1:] alone only
+				// moves the start pointer, keeping the backing array (and
+				// all its earlier elements) alive.
+				lines[0] = ""
 				lines = lines[1:]
 			}
 			if len(lines) < origLen && totalBytes <= maxBytes {

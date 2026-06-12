@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,6 +23,14 @@ const (
 	logTimeout      = 10 * time.Second
 	maxSearchLength = 256
 )
+
+// ringPool reuses []string slices for the log ring buffer to reduce GC pressure.
+var ringPool = sync.Pool{
+	New: func() any {
+		s := make([]string, 0, logMaxLines)
+		return &s
+	},
+}
 
 // truncateSearch caps the byte length of a user-supplied search string and
 // backs up past any incomplete trailing UTF-8 rune so the result is always
@@ -125,7 +134,24 @@ func readLogFile(ctx context.Context, filePath string, maxLines int, search stri
 		return nil, &fileTooLargeError{size: info.Size()}
 	}
 
-	ring := make([]string, maxLines)
+	// Reuse ring buffer from pool to reduce GC pressure.
+	ringPtr := ringPool.Get().(*[]string)
+	fromPool := cap(*ringPtr) >= maxLines
+	var ring []string
+	if fromPool {
+		ring = (*ringPtr)[:maxLines]
+	} else {
+		ring = make([]string, maxLines)
+	}
+	defer func() {
+		if fromPool {
+			// Reset length before returning to pool. Element references are
+			// harmless: the result slice is now always an independent copy,
+			// and the pool is bounded anyway.
+			*ringPtr = ring[:0]
+			ringPool.Put(ringPtr)
+		}
+	}()
 	pos := 0
 	count := 0
 
@@ -152,10 +178,14 @@ func readLogFile(ctx context.Context, filePath string, maxLines int, search stri
 		return nil, fmt.Errorf("扫描日志文件 %s 失败: %w", filePath, err)
 	}
 
-	// Fewer lines than capacity — return the filled portion in order.
+	// Fewer lines than capacity — copy to a fresh slice so the result does
+	// not share the pool's backing array. Without the copy, a concurrent
+	// goroutine that obtains the same pool entry could overwrite elements
+	// while the caller is still reading result (e.g. JSON serialization).
 	var result []string
 	if count < maxLines {
-		result = ring[:count]
+		result = make([]string, count)
+		copy(result, ring[:count])
 	} else {
 		// Buffer wrapped — rotate so oldest line is first.
 		result = make([]string, maxLines)

@@ -40,6 +40,10 @@ func CheckOrigin(allowedOrigins []string) func(http.Handler) http.Handler {
 			if origin == "" {
 				switch r.Method {
 				case http.MethodGet, http.MethodHead, http.MethodOptions:
+					// Even without an Origin header, set Vary so caches know
+					// the response differs when Origin IS present (CORS
+					// headers are only added for known origins below).
+					w.Header().Add("Vary", "Origin")
 				default:
 					log.Printf("警告: 拒绝了缺少 Origin 头的状态变更请求: %s %s", r.Method, r.URL.Path)
 					w.Header().Set("Content-Type", "application/json")
@@ -58,6 +62,19 @@ func CheckOrigin(allowedOrigins []string) func(http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"非法请求来源 (Invalid Origin)"}`))
+				return
+			}
+
+			// Set CORS headers for allowed origins.
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Add("Vary", "Origin")
+
+			// Handle preflight requests.
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 

@@ -96,7 +96,9 @@ func main() {
 		}
 		log.Printf("连接失败 (尝试 %d/%d): 当前状态 %s", i+1, maxRetries, conn.GetState())
 		if i < maxRetries-1 {
-			time.Sleep(2 * time.Second)
+			// Exponential backoff: 1s, 2s
+			backoff := time.Duration(1<<i) * time.Second
+			time.Sleep(backoff)
 		}
 	}
 
@@ -129,13 +131,16 @@ func main() {
 	finalHandler = middleware.Recovery(finalHandler)
 
 	addr := net.JoinHostPort(cfg.Server.Host, cfg.Server.Port)
-	// WriteTimeout 故意不设置，因为 SSE 端点需要长时间保持连接写入数据。
-	// 非 SSE 路由的超时通过 context.WithTimeout 在各 handler 内部控制。
+	// WriteTimeout is set to 30s so that slow clients cannot hold
+	// connections indefinitely for non-SSE routes. The SSE handler
+	// explicitly removes this deadline via http.NewResponseController
+	// because SSE streams are long-lived by design.
 	httpServer := &http.Server{
-		Addr:        addr,
-		Handler:     finalHandler,
-		ReadTimeout: 10 * time.Second,
-		IdleTimeout: 120 * time.Second,
+		Addr:         addr,
+		Handler:      finalHandler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	serverErrors := make(chan error, 1)

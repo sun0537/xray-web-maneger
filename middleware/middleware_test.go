@@ -153,6 +153,97 @@ func resetAuthLimiter() {
 	authLimiter.Unlock()
 }
 
+func TestCheckOriginCORSHeaders(t *testing.T) {
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	allowedOrigins := []string{"http://localhost:8080", "http://app.prod.com"}
+	middleware := CheckOrigin(allowedOrigins)
+	testHandler := middleware(okHandler)
+
+	// --- 允许的 Origin 应返回正确的 CORS 响应头 ---
+	t.Run("Allowed origin sets CORS headers", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		req.Header.Set("Origin", "http://localhost:8080")
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "http://localhost:8080", rr.Header().Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "GET, POST, HEAD, OPTIONS", rr.Header().Get("Access-Control-Allow-Methods"))
+		assert.Equal(t, "Content-Type, Authorization", rr.Header().Get("Access-Control-Allow-Headers"))
+		assert.Equal(t, "86400", rr.Header().Get("Access-Control-Max-Age"))
+		assert.Equal(t, "Origin", rr.Header().Get("Vary"))
+	})
+
+	// --- OPTIONS 预飞行请求应返回 204 No Content ---
+	t.Run("OPTIONS preflight returns 204", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", "/api/switch", nil)
+		req.Header.Set("Origin", "http://app.prod.com")
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusNoContent, rr.Code)
+		assert.Equal(t, "http://app.prod.com", rr.Header().Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "GET, POST, HEAD, OPTIONS", rr.Header().Get("Access-Control-Allow-Methods"))
+		assert.Equal(t, "Origin", rr.Header().Get("Vary"))
+		assert.Equal(t, "", rr.Body.String(), "OPTIONS 响应体应为空")
+	})
+
+	// --- 非法 Origin 的 OPTIONS 请求应返回 403 ---
+	t.Run("Invalid origin OPTIONS returns 403", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", "/api/switch", nil)
+		req.Header.Set("Origin", "http://evil.com")
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusForbidden, rr.Code)
+		assert.Contains(t, rr.Body.String(), "非法请求来源")
+	})
+
+	// --- 不同的允许 Origin 应设置对应的 Allow-Origin 头 ---
+	t.Run("Different allowed origin gets correct header", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/switch", nil)
+		req.Header.Set("Origin", "http://app.prod.com")
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "http://app.prod.com", rr.Header().Get("Access-Control-Allow-Origin"))
+	})
+
+	// --- Origin 带尾部斜杠应被正确 trim ---
+	t.Run("Origin trailing slash is trimmed", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		req.Header.Set("Origin", "http://localhost:8080/")
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "http://localhost:8080", rr.Header().Get("Access-Control-Allow-Origin"))
+	})
+
+	// --- 无 Origin 的 GET 请求：不设 CORS 头，但应有 Vary: Origin ---
+	t.Run("No Origin GET sets Vary but no CORS headers", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		rr := httptest.NewRecorder()
+
+		testHandler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "", rr.Header().Get("Access-Control-Allow-Origin"), "无 Origin 时不应设置 ACAO")
+		assert.Equal(t, "Origin", rr.Header().Get("Vary"), "无 Origin 的安全请求也应设置 Vary: Origin")
+	})
+}
+
 func TestRateLimit(t *testing.T) {
 	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

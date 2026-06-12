@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -774,4 +775,65 @@ func TestGetCombinedStats(t *testing.T) {
 		// deadline is checked, so we just verify no panic occurs.
 		s.getCombinedStats()
 	})
+}
+
+// callCountingStatsClient wraps MockStatsClient and counts GetSysStats calls.
+type callCountingStatsClient struct {
+	MockStatsClient
+	sysCalls atomic.Int32
+}
+
+func (c *callCountingStatsClient) GetSysStats(ctx context.Context, in *statspb.SysStatsRequest, opts ...grpc.CallOption) (*statspb.SysStatsResponse, error) {
+	c.sysCalls.Add(1)
+	return c.MockStatsClient.GetSysStats(ctx, in, opts...)
+}
+
+// TestHandleHealthCheckStaleFlag verifies that when the health cache has
+// stale=true (set after an outbound switch), the next health check bypasses
+// the cache and makes a fresh gRPC call, even if the cache timestamp is fresh.
+func TestHandleHealthCheckStaleFlag(t *testing.T) {
+	mock := &callCountingStatsClient{}
+	sseMgr := sse.NewManager()
+	s := &Server{
+		config: config.Config{
+			Xray: config.XrayConfig{BalancerTag: "balancer"},
+		},
+		statsClient: mock,
+		sseManager:  sseMgr,
+		startTime:   time.Now().Add(-100 * time.Second),
+		shutdownCtx: context.Background(),
+	}
+
+	// 1. First health check: no cache, so gRPC should be called.
+	req1 := httptest.NewRequest("GET", "/api/health", nil)
+	rr1 := httptest.NewRecorder()
+	s.handleHealthCheck(rr1, req1)
+	assert.Equal(t, http.StatusOK, rr1.Code)
+	assert.Equal(t, int32(1), mock.sysCalls.Load(), "第一次健康检查应触发 gRPC 调用")
+
+	// 2. Second health check immediately: cache is fresh (< 10s), stale=false,
+	//    so gRPC should NOT be called again.
+	req2 := httptest.NewRequest("GET", "/api/health", nil)
+	rr2 := httptest.NewRecorder()
+	s.handleHealthCheck(rr2, req2)
+	assert.Equal(t, http.StatusOK, rr2.Code)
+	assert.Equal(t, int32(1), mock.sysCalls.Load(), "缓存新鲜时不应重复调用 gRPC")
+
+	// 3. Simulate outbound switch: mark cache as stale.
+	s.healthMu.Lock()
+	s.healthCache = cachedHealth{status: "connected", timestamp: time.Now(), stale: true}
+	s.healthMu.Unlock()
+
+	// 4. Third health check: cache exists and timestamp is fresh, BUT stale=true,
+	//    so gRPC MUST be called.
+	req3 := httptest.NewRequest("GET", "/api/health", nil)
+	rr3 := httptest.NewRecorder()
+	s.handleHealthCheck(rr3, req3)
+	assert.Equal(t, http.StatusOK, rr3.Code)
+	assert.Equal(t, int32(2), mock.sysCalls.Load(), "stale=true 时应跳过缓存并调用 gRPC")
+
+	// 5. Verify the response reflects the fresh data.
+	var health HealthStatus
+	json.Unmarshal(rr3.Body.Bytes(), &health)
+	assert.Equal(t, "connected", health.XrayAPIStatus)
 }
