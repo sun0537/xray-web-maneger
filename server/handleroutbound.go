@@ -159,7 +159,7 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 
 	// Invalidate health cache so the next health check reflects the new state.
 	s.healthMu.Lock()
-	s.healthCache = cachedHealth{}
+	s.healthCache = cachedHealth{stale: true}
 	s.healthMu.Unlock()
 
 	log.Printf("审计: 切换出站成功 [目标: %s, 请求来源: %s]", reqBody.OutboundTag, middleware.ClientIPFromContext(r))

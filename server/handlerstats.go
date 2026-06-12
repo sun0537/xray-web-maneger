@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	statspb "xray-web-manager/internal/xray-proto/app/stats/command"
@@ -28,6 +29,31 @@ var (
 	sseEventPrefix = []byte("event: update\ndata: ")
 	sseEventSuffix = []byte("\n\n")
 )
+
+// Throttle BPS warning logs to at most once every 5 minutes to avoid log spam
+// when Xray restarts and counters reset. Uses atomic CAS so at most one
+// goroutine wins the race and logs per interval window.
+var (
+	bpsUplinkWarnLast   atomic.Int64
+	bpsDownlinkWarnLast atomic.Int64
+)
+
+// bpsWarnIntervalSec is the minimum seconds between BPS warning logs.
+const bpsWarnIntervalSec = int64(300) // 5 minutes
+
+// warnBPSOnce logs a BPS warning at most once per bpsWarnIntervalSec.
+// Returns true if this call emitted the log.
+func warnBPSOnce(last *atomic.Int64, format string, v ...any) bool {
+	now := time.Now().Unix()
+	prev := last.Load()
+	if now-prev >= bpsWarnIntervalSec {
+		if last.CompareAndSwap(prev, now) {
+			log.Printf(format, v...)
+			return true
+		}
+	}
+	return false
+}
 
 // sseWriteEvent writes a single SSE "event: update\ndata: <json>\n\n" frame.
 // Avoids the temporary buffer and string formatting of fmt.Fprintf for the
@@ -63,6 +89,15 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+
+	// Remove the server-level WriteTimeout so the long-lived SSE stream
+	// is not killed by the 30s deadline that protects non-SSE routes.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		// Non-fatal: the connection will still work, it just has a
+		// 30s write deadline which may cause premature disconnects.
+		log.Printf("SSE: 无法取消写超时: %v", err)
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -280,12 +315,12 @@ func computeBPS(data, prev any, tickAt, prevAt time.Time) any {
 
 	curr.UplinkBPS = float64(curr.Uplink-last.Uplink) / elapsed
 	if curr.UplinkBPS < 0 {
-		log.Printf("警告: 上行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.UplinkBPS)
+		warnBPSOnce(&bpsUplinkWarnLast, "警告: 上行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.UplinkBPS)
 		curr.UplinkBPS = 0
 	}
 	curr.DownlinkBPS = float64(curr.Downlink-last.Downlink) / elapsed
 	if curr.DownlinkBPS < 0 {
-		log.Printf("警告: 下行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.DownlinkBPS)
+		warnBPSOnce(&bpsDownlinkWarnLast, "警告: 下行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.DownlinkBPS)
 		curr.DownlinkBPS = 0
 	}
 

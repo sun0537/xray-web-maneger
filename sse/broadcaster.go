@@ -145,6 +145,13 @@ func (b *Broadcaster) Unsubscribe(ch chan any) {
 		b.idleTimer = time.AfterFunc(broadcasterIdleTimeout, func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
+			// Guard against the race where Stop() runs between the timer
+			// firing and this callback acquiring the lock. Stop() already
+			// handles cleanup, so we must not touch stopCh.
+			if b.stopped {
+				b.idleTimer = nil
+				return
+			}
 			if len(b.subscribers) == 0 && b.stopCh != nil {
 				close(b.stopCh)
 				b.stopCh = nil
@@ -193,13 +200,17 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 				if consecutiveErrors == maxConsecutiveErrors {
 					degradedEvent := map[string]any{"degraded": true, "error": "数据源不可用"}
 					b.mu.Lock()
+					chans := make([]chan any, 0, len(b.subscribers))
 					for ch := range b.subscribers {
+						chans = append(chans, ch)
+					}
+					b.mu.Unlock()
+					for _, ch := range chans {
 						select {
 						case ch <- degradedEvent:
 						default:
 						}
 					}
-					b.mu.Unlock()
 				}
 				continue
 			}
@@ -240,15 +251,22 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 			b.lastBroadcast = broadcast
 			b.lastMu.Unlock()
 
+			// Copy subscribers under lock, send outside lock to avoid
+			// blocking Subscribe/Unsubscribe during channel sends.
 			b.mu.Lock()
+			chans := make([]chan any, 0, len(b.subscribers))
 			for ch := range b.subscribers {
+				chans = append(chans, ch)
+			}
+			b.mu.Unlock()
+
+			for _, ch := range chans {
 				select {
 				case ch <- broadcast:
 				default:
 					b.droppedMsgs.Add(1)
 				}
 			}
-			b.mu.Unlock()
 
 			if dropped := b.droppedMsgs.Swap(0); dropped > 0 {
 				log.Printf("警告: SSE 广播丢弃了 %d 条消息 (订阅者 channel 已满)", dropped)

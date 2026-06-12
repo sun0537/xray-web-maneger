@@ -2,6 +2,8 @@ package sse
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -306,4 +308,56 @@ func TestBroadcasterUnsubscribeIdempotent(t *testing.T) {
 	// A third call, after Stop, must also be safe.
 	b.Stop()
 	b.Unsubscribe(ch)
+}
+
+// TestBroadcasterConcurrentFanOut exercises the "copy-under-lock, send-outside-
+// lock" fan-out pattern under concurrent Subscribe/Unsubscribe pressure.
+// Run with -race to verify there are no data races when the broadcaster loop
+// copies the subscriber map while other goroutines modify it.
+func TestBroadcasterConcurrentFanOut(t *testing.T) {
+	var fetchCount atomic.Int32
+	b := NewBroadcaster(func() (any, error) {
+		n := fetchCount.Add(1)
+		return RawEvent{JSON: []byte(fmt.Sprintf(`{"tick":%d}`, n))}, nil
+	}, nil, 20*time.Millisecond)
+	defer b.Stop()
+
+	const (
+		numSubscribers = 20
+		duration       = 500 * time.Millisecond
+	)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Spawn many goroutines that rapidly subscribe, drain some events,
+	// then unsubscribe — all while the broadcaster is actively fanning out.
+	for i := 0; i < numSubscribers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+
+				ch := b.Subscribe()
+				// Drain between 1 and 3 events.
+				drain := 1 + (int(time.Now().UnixNano()) % 3)
+				for d := 0; d < drain; d++ {
+					select {
+					case <-ch:
+					case <-time.After(100 * time.Millisecond):
+					}
+				}
+				b.Unsubscribe(ch)
+			}
+		}()
+	}
+
+	time.Sleep(duration)
+	close(stop)
+	wg.Wait()
 }

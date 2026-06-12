@@ -12,6 +12,7 @@ import (
 type cachedHealth struct {
 	status    string
 	timestamp time.Time
+	stale     bool // Set to true when cache should be refreshed immediately
 }
 
 type HealthStatus struct {
@@ -29,12 +30,12 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	s.healthMu.RUnlock()
 
 	xrayStatus := cached.status
-	if time.Since(cached.timestamp) > 10*time.Second {
+	if cached.stale || time.Since(cached.timestamp) > 10*time.Second {
 		result, err, _ := s.healthGroup.Do(healthGroupKey, func() (any, error) {
 			s.healthMu.RLock()
 			fresh := s.healthCache
 			s.healthMu.RUnlock()
-			if time.Since(fresh.timestamp) <= 10*time.Second {
+			if !fresh.stale && time.Since(fresh.timestamp) <= 10*time.Second {
 				return fresh.status, nil
 			}
 
@@ -58,7 +59,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 				cacheTime = time.Now().Add(-7 * time.Second)
 			}
 			s.healthMu.Lock()
-			s.healthCache = cachedHealth{status: xrayStatus, timestamp: cacheTime}
+			s.healthCache = cachedHealth{status: xrayStatus, timestamp: cacheTime, stale: false}
 			s.healthMu.Unlock()
 		}
 	}
