@@ -34,9 +34,31 @@ type Server struct {
 	shutdownCancel    context.CancelFunc
 	healthGroup       singleflight.Group
 	statsGroup        singleflight.Group
+	obsGroup          singleflight.Group
+	excludedTagsGroup singleflight.Group
 	healthMu          sync.RWMutex
 	healthCache       cachedHealth
 	backgroundWg      sync.WaitGroup // tracks background goroutines for graceful shutdown
+	obsCacheMu        sync.RWMutex
+	obsCache          cachedObservatory
+	excludedTagsMu    sync.RWMutex
+	excludedTagsCache cachedExcludedTags
+}
+
+// cachedExcludedTags holds a short-lived cache for the excluded-tags set
+// derived from the outbound list. Avoids duplicate ListOutbounds gRPC calls
+// when /api/current-outbound (auto mode) is requested in quick succession.
+type cachedExcludedTags struct {
+	tags      map[string]struct{}
+	timestamp time.Time
+}
+
+// cachedObservatory holds a short-lived cache for observatory gRPC responses
+// to avoid duplicate calls when /api/current-outbound and /api/outbounds-status
+// are requested in quick succession during page load.
+type cachedObservatory struct {
+	data      []OutboundStatusData
+	timestamp time.Time
 }
 
 // NewServer creates a new Server instance.
@@ -104,6 +126,8 @@ const (
 	reconnectRecoveryTimeout = 10 * time.Second
 	healthGroupKey           = "xray-health"
 	combinedStatsGroupKey    = "combined-stats"
+	observatoryGroupKey      = "observatory-status"
+	excludedTagsGroupKey     = "excluded-tags"
 )
 
 // StartReconnectMonitor monitors gRPC connection state and reconnects on failure.

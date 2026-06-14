@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -195,6 +196,18 @@ func (m *mockObservatoryClientError) GetOutboundStatus(_ context.Context, _ *obs
 
 type MockRoutingClient = mockRoutingClient
 
+// mockHandlerClientCustom wraps MockHandlerClient but overrides ListOutbounds
+// to return caller-supplied outbounds. Used by findBestAvailableNode tests
+// that need specific protocol/tag combinations.
+type mockHandlerClientCustom struct {
+	MockHandlerClient
+	outbounds []*core.OutboundHandlerConfig
+}
+
+func (m *mockHandlerClientCustom) ListOutbounds(_ context.Context, _ *handlerpb.ListOutboundsRequest, _ ...grpc.CallOption) (*handlerpb.ListOutboundsResponse, error) {
+	return &handlerpb.ListOutboundsResponse{Outbounds: m.outbounds}, nil
+}
+
 // MockRoutingClientWithInfo returns a balancer response with an override set.
 type MockRoutingClientWithInfo struct {
 	override *routingpb.OverrideInfo
@@ -356,7 +369,7 @@ func TestHandleStatsSSE(t *testing.T) {
 		statsClient:       &MockStatsClient{},
 		sseManager:        sseMgr,
 		handlerClient:     &MockHandlerClient{},
-		routingClient:     &mockRoutingClient{},
+		routingClient:     &MockRoutingClient{},
 		observatoryClient: &mockObservatoryClient{},
 		broadcaster:       broadcaster,
 		startTime:         time.Time{},
@@ -411,7 +424,7 @@ func TestHandleSwitchOutbound(t *testing.T) {
 		config: config.Config{
 			Xray: config.XrayConfig{BalancerTag: "balancer"},
 		},
-		routingClient: &mockRoutingClient{},
+		routingClient: &MockRoutingClient{},
 	}
 
 	t.Run("Success", func(t *testing.T) {
@@ -637,6 +650,400 @@ func TestHandleGetCurrentOutbound(t *testing.T) {
 	})
 }
 
+func TestHandleGetCurrentOutboundActiveNode(t *testing.T) {
+	t.Run("Auto mode returns best available node", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			handlerClient:     &MockHandlerClient{},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 100},
+				{OutboundTag: "node-2", Alive: true, Delay: 50},
+				{OutboundTag: "node-3", Alive: false, Delay: 0},
+			}},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.True(t, resp.Auto)
+		assert.Equal(t, "", resp.Current)
+		assert.Equal(t, "node-2", resp.ActiveNode)
+	})
+
+	t.Run("Auto mode with no healthy nodes returns empty active node", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			handlerClient:     &MockHandlerClient{},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: false, Delay: 0},
+				{OutboundTag: "node-2", Alive: false, Delay: 0},
+			}},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.True(t, resp.Auto)
+		assert.Equal(t, "", resp.ActiveNode)
+	})
+
+	t.Run("Auto mode with nil observatory client returns empty active node", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			handlerClient:     &MockHandlerClient{},
+			observatoryClient: nil,
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.True(t, resp.Auto)
+		assert.Equal(t, "", resp.ActiveNode)
+	})
+
+	t.Run("Auto mode with observatory error returns empty active node", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			handlerClient:     &MockHandlerClient{},
+			observatoryClient: &mockObservatoryClientError{},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.True(t, resp.Auto)
+		assert.Equal(t, "", resp.ActiveNode)
+	})
+
+	t.Run("Auto mode fallback to first alive node when all delays zero", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			handlerClient:     &MockHandlerClient{},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 0},
+				{OutboundTag: "node-2", Alive: true, Delay: 0},
+			}},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.True(t, resp.Auto)
+		assert.Equal(t, "node-1", resp.ActiveNode)
+	})
+
+	t.Run("Manual mode does not populate active node", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient: &MockRoutingClientWithInfo{
+				override: &routingpb.OverrideInfo{Target: "node-1"},
+			},
+			handlerClient: &MockHandlerClient{},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+				{OutboundTag: "node-2", Alive: true, Delay: 100},
+			}},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.False(t, resp.Auto)
+		assert.Equal(t, "node-1", resp.Current)
+		assert.Equal(t, "", resp.ActiveNode)
+	})
+
+	t.Run("Picks node with lowest delay among alive nodes", func(t *testing.T) {
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			handlerClient:     &MockHandlerClient{},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "fast-node", Alive: true, Delay: 10},
+				{OutboundTag: "medium-node", Alive: true, Delay: 200},
+				{OutboundTag: "dead-node", Alive: false, Delay: 0},
+				{OutboundTag: "slow-node", Alive: true, Delay: 500},
+			}},
+		}
+
+		req := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp CurrentOutboundData
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.True(t, resp.Auto)
+		assert.Equal(t, "fast-node", resp.ActiveNode)
+	})
+}
+
+func TestFindBestAvailableNode(t *testing.T) {
+	t.Run("Returns empty when observatory client is nil", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: nil}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("Returns empty when no statuses", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{}}}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("Returns empty when observatory returns error", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: &mockObservatoryClientError{}}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("Skips dead nodes and zero-delay nodes", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+			{OutboundTag: "dead", Alive: false, Delay: 100},
+			{OutboundTag: "zero-delay", Alive: true, Delay: 0},
+			{OutboundTag: "alive", Alive: true, Delay: 50},
+		}}}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "alive", result)
+	})
+
+	t.Run("Returns lowest delay node", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+			{OutboundTag: "slow", Alive: true, Delay: 300},
+			{OutboundTag: "fast", Alive: true, Delay: 20},
+			{OutboundTag: "medium", Alive: true, Delay: 100},
+		}}}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "fast", result)
+	})
+
+	t.Run("Returns empty when all nodes are dead", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+			{OutboundTag: "dead1", Alive: false, Delay: 0},
+			{OutboundTag: "dead2", Alive: false, Delay: 0},
+		}}}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("Fallback to first alive node when all delays are zero", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+			{OutboundTag: "dead", Alive: false, Delay: 0},
+			{OutboundTag: "alive-1", Alive: true, Delay: 0},
+			{OutboundTag: "alive-2", Alive: true, Delay: 0},
+		}}}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "alive-1", result, "所有 alive 节点 Delay=0 时应 fallback 到第一个 alive 节点")
+	})
+
+	t.Run("Prefers measured node over zero-delay fallback", func(t *testing.T) {
+		s := &Server{handlerClient: &MockHandlerClient{}, observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+			{OutboundTag: "unmeasured", Alive: true, Delay: 0},
+			{OutboundTag: "measured", Alive: true, Delay: 100},
+		}}}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "measured", result, "有已探测节点时应优先选择，而非 fallback")
+	})
+
+	t.Run("Excludes nodes with non-proxy protocols", func(t *testing.T) {
+		s := &Server{
+			handlerClient: &mockHandlerClientCustom{
+				outbounds: []*core.OutboundHandlerConfig{
+					{Tag: "freedom-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.freedom.Config"}},
+					{Tag: "proxy-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.vmess.outbound.Config"}},
+					{Tag: "blackhole-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.blackhole.outbound.Config"}},
+				},
+			},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "freedom-out", Alive: true, Delay: 10},
+				{OutboundTag: "proxy-out", Alive: true, Delay: 50},
+				{OutboundTag: "blackhole-out", Alive: true, Delay: 20},
+			}},
+		}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "proxy-out", result, "应选择代理节点，排除 freedom/blackhole 等非代理协议")
+	})
+
+	t.Run("Returns empty when all alive nodes have excluded protocols", func(t *testing.T) {
+		s := &Server{
+			handlerClient: &mockHandlerClientCustom{
+				outbounds: []*core.OutboundHandlerConfig{
+					{Tag: "freedom-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.freedom.Config"}},
+					{Tag: "dns-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.dns.Config"}},
+				},
+			},
+			observatoryClient: &mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "freedom-out", Alive: true, Delay: 10},
+				{OutboundTag: "dns-out", Alive: true, Delay: 20},
+			}},
+		}
+		result := s.findBestAvailableNode()
+		assert.Equal(t, "", result, "所有 alive 节点都是排除协议时应返回空")
+	})
+}
+
+func TestBuildExcludedTags(t *testing.T) {
+	t.Run("Nil handler client returns empty set", func(t *testing.T) {
+		s := &Server{handlerClient: nil}
+		tags := s.buildExcludedTags()
+		assert.Empty(t, tags)
+	})
+
+	t.Run("Caches result within TTL", func(t *testing.T) {
+		mock := &callCountingHandlerClient{
+			outbounds: []*core.OutboundHandlerConfig{
+				{Tag: "freedom-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.freedom.Config"}},
+				{Tag: "proxy-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.vmess.outbound.Config"}},
+			},
+		}
+		s := &Server{handlerClient: mock}
+
+		tags1 := s.buildExcludedTags()
+		assert.Equal(t, int32(1), mock.callCount.Load())
+		assert.Contains(t, tags1, "freedom-out")
+		assert.NotContains(t, tags1, "proxy-out")
+
+		// Second call within TTL should use cache.
+		tags2 := s.buildExcludedTags()
+		assert.Equal(t, int32(1), mock.callCount.Load(), "TTL 内应使用缓存，不重复调用 ListOutbounds")
+		assert.Contains(t, tags2, "freedom-out")
+	})
+
+	t.Run("Concurrent calls are coalesced by singleflight", func(t *testing.T) {
+		mock := newGatedHandlerClient([]*core.OutboundHandlerConfig{
+			{Tag: "freedom-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.freedom.Config"}},
+			{Tag: "proxy-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.vmess.outbound.Config"}},
+		})
+		s := &Server{handlerClient: mock}
+
+		const n = 10
+		results := make([]map[string]struct{}, n)
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			idx := i
+			go func() {
+				defer wg.Done()
+				results[idx] = s.buildExcludedTags()
+			}()
+		}
+
+		<-mock.ready
+		close(mock.release)
+		wg.Wait()
+
+		count := mock.callCount.Load()
+		assert.Equal(t, int32(1), count, "并发调用应被 singleflight 合并为 1 次 ListOutbounds，实际 %d 次", count)
+		for i, r := range results {
+			assert.Contains(t, r, "freedom-out", "goroutine %d 应包含 freedom-out", i)
+			assert.NotContains(t, r, "proxy-out", "goroutine %d 不应包含 proxy-out", i)
+		}
+	})
+
+	t.Run("Cache expires and refetches", func(t *testing.T) {
+		mock := &callCountingHandlerClient{
+			outbounds: []*core.OutboundHandlerConfig{
+				{Tag: "dns-out", ProxySettings: &serial.TypedMessage{Type: "xray.proxy.dns.Config"}},
+			},
+		}
+		s := &Server{handlerClient: mock}
+
+		s.buildExcludedTags()
+		assert.Equal(t, int32(1), mock.callCount.Load())
+
+		// Manually expire cache.
+		s.excludedTagsMu.Lock()
+		s.excludedTagsCache = cachedExcludedTags{}
+		s.excludedTagsMu.Unlock()
+
+		s.buildExcludedTags()
+		assert.Equal(t, int32(2), mock.callCount.Load(), "缓存过期后应重新调用 ListOutbounds")
+	})
+}
+
+// callCountingHandlerClient wraps MockHandlerClient and counts ListOutbounds calls.
+type callCountingHandlerClient struct {
+	MockHandlerClient
+	outbounds []*core.OutboundHandlerConfig
+	callCount atomic.Int32
+}
+
+func (m *callCountingHandlerClient) ListOutbounds(_ context.Context, _ *handlerpb.ListOutboundsRequest, _ ...grpc.CallOption) (*handlerpb.ListOutboundsResponse, error) {
+	m.callCount.Add(1)
+	return &handlerpb.ListOutboundsResponse{Outbounds: m.outbounds}, nil
+}
+
+// gatedHandlerClient blocks ListOutbounds until release is closed,
+// allowing deterministic concurrency testing of singleflight.
+type gatedHandlerClient struct {
+	MockHandlerClient
+	outbounds []*core.OutboundHandlerConfig
+	ready     chan struct{}
+	release   chan struct{}
+	callCount atomic.Int32
+}
+
+func newGatedHandlerClient(outbounds []*core.OutboundHandlerConfig) *gatedHandlerClient {
+	return &gatedHandlerClient{
+		outbounds: outbounds,
+		ready:     make(chan struct{}, 16),
+		release:   make(chan struct{}),
+	}
+}
+
+func (m *gatedHandlerClient) ListOutbounds(_ context.Context, _ *handlerpb.ListOutboundsRequest, _ ...grpc.CallOption) (*handlerpb.ListOutboundsResponse, error) {
+	m.callCount.Add(1)
+	select {
+	case m.ready <- struct{}{}:
+	default:
+	}
+	<-m.release
+	return &handlerpb.ListOutboundsResponse{Outbounds: m.outbounds}, nil
+}
+
 func TestHandleGetCurrentOutboundWithOverride(t *testing.T) {
 	t.Run("Returns current tag when override set", func(t *testing.T) {
 		s := &Server{
@@ -760,7 +1167,7 @@ func TestGetCombinedStats(t *testing.T) {
 		}
 		_, err := s.getCombinedStats()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "all data sources failed")
+		assert.Contains(t, err.Error(), "stats and sys data sources failed")
 	})
 
 	t.Run("Shutdown context cancelled — returns early", func(t *testing.T) {
@@ -836,4 +1243,327 @@ func TestHandleHealthCheckStaleFlag(t *testing.T) {
 	var health HealthStatus
 	json.Unmarshal(rr3.Body.Bytes(), &health)
 	assert.Equal(t, "connected", health.XrayAPIStatus)
+}
+
+// callCountingObservatoryClient wraps mockObservatoryClient and counts
+// GetOutboundStatus calls so tests can verify caching behavior.
+type callCountingObservatoryClient struct {
+	mockObservatoryClient
+	callCount atomic.Int32
+}
+
+func (c *callCountingObservatoryClient) GetOutboundStatus(ctx context.Context, in *observatorypb.GetOutboundStatusRequest, opts ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	c.callCount.Add(1)
+	return c.mockObservatoryClient.GetOutboundStatus(ctx, in, opts...)
+}
+
+func TestObservatoryCache(t *testing.T) {
+	t.Run("Consecutive calls within TTL use cache", func(t *testing.T) {
+		mock := &callCountingObservatoryClient{
+			mockObservatoryClient: mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+			}},
+		}
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: mock,
+		}
+
+		// First call should hit gRPC.
+		req1 := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr1 := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr1, req1)
+		assert.Equal(t, http.StatusOK, rr1.Code)
+		assert.Equal(t, int32(1), mock.callCount.Load(), "第一次调用应触发 gRPC")
+
+		// Second call within TTL should use cache.
+		req2 := httptest.NewRequest("GET", "/api/outbounds-status", nil)
+		rr2 := httptest.NewRecorder()
+		s.handleGetOutboundsStatus(rr2, req2)
+		assert.Equal(t, http.StatusOK, rr2.Code)
+		assert.Equal(t, int32(1), mock.callCount.Load(), "TTL 内的第二次调用应使用缓存，不触发 gRPC")
+	})
+
+	t.Run("Call after TTL expiry triggers new gRPC call", func(t *testing.T) {
+		mock := &callCountingObservatoryClient{
+			mockObservatoryClient: mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+			}},
+		}
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: mock,
+		}
+
+		// First call.
+		req1 := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr1 := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr1, req1)
+		assert.Equal(t, int32(1), mock.callCount.Load())
+
+		// Manually expire the cache.
+		s.obsCacheMu.Lock()
+		s.obsCache = cachedObservatory{}
+		s.obsCacheMu.Unlock()
+
+		// Second call should hit gRPC again.
+		req2 := httptest.NewRequest("GET", "/api/outbounds-status", nil)
+		rr2 := httptest.NewRecorder()
+		s.handleGetOutboundsStatus(rr2, req2)
+		assert.Equal(t, int32(2), mock.callCount.Load(), "缓存过期后应重新调用 gRPC")
+	})
+
+	t.Run("Outbound switch invalidates observatory cache", func(t *testing.T) {
+		mock := &callCountingObservatoryClient{
+			mockObservatoryClient: mockObservatoryClient{statuses: []*observatory.OutboundStatus{
+				{OutboundTag: "node-1", Alive: true, Delay: 50},
+			}},
+		}
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: mock,
+		}
+
+		// First call to populate cache.
+		req1 := httptest.NewRequest("GET", "/api/current-outbound", nil)
+		rr1 := httptest.NewRecorder()
+		s.handleGetCurrentOutbound(rr1, req1)
+		assert.Equal(t, int32(1), mock.callCount.Load())
+
+		// Switch outbound should invalidate cache.
+		body := `{"outbound_tag": "node-1"}`
+		req2 := httptest.NewRequest("POST", "/api/switch-outbound", strings.NewReader(body))
+		req2.Header.Set("Content-Type", "application/json")
+		rr2 := httptest.NewRecorder()
+		s.handleSwitchOutbound(rr2, req2)
+		assert.Equal(t, http.StatusOK, rr2.Code)
+
+		// Next call should hit gRPC again (cache was invalidated).
+		req3 := httptest.NewRequest("GET", "/api/outbounds-status", nil)
+		rr3 := httptest.NewRecorder()
+		s.handleGetOutboundsStatus(rr3, req3)
+		assert.Equal(t, int32(2), mock.callCount.Load(), "切换出站后缓存应失效，重新调用 gRPC")
+	})
+}
+
+// gatedObservatoryClient blocks GetOutboundStatus until release is closed,
+// allowing deterministic concurrency testing of singleflight.
+// ready is a buffered channel; each goroutine sends on it before waiting for release.
+type gatedObservatoryClient struct {
+	mockObservatoryClient
+	ready     chan struct{}
+	release   chan struct{}
+	callCount atomic.Int32
+}
+
+func (c *gatedObservatoryClient) GetOutboundStatus(ctx context.Context, in *observatorypb.GetOutboundStatusRequest, opts ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	c.callCount.Add(1)
+	select {
+	case c.ready <- struct{}{}:
+	default:
+	}
+	<-c.release
+	return c.mockObservatoryClient.GetOutboundStatus(ctx, in, opts...)
+}
+
+// newGatedObservatoryClient creates a client with the given statuses and
+// freshly allocated ready/release channels.
+func newGatedObservatoryClient(statuses []*observatory.OutboundStatus) *gatedObservatoryClient {
+	return &gatedObservatoryClient{
+		mockObservatoryClient: mockObservatoryClient{statuses: statuses},
+		ready:                 make(chan struct{}, 16),
+		release:               make(chan struct{}),
+	}
+}
+
+// errorObservatoryClient always returns an error.
+type errorObservatoryClient struct {
+	callCount atomic.Int32
+}
+
+func (c *errorObservatoryClient) GetOutboundStatus(_ context.Context, _ *observatorypb.GetOutboundStatusRequest, _ ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	c.callCount.Add(1)
+	return nil, fmt.Errorf("observatory unavailable")
+}
+
+func TestObservatorySingleflight(t *testing.T) {
+	t.Run("Concurrent calls are coalesced into one gRPC call", func(t *testing.T) {
+		mock := newGatedObservatoryClient([]*observatory.OutboundStatus{
+			{OutboundTag: "node-1", Alive: true, Delay: 50},
+		})
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: mock,
+		}
+
+		// Fire N concurrent requests while cache is empty.
+		const n = 10
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func() {
+				defer wg.Done()
+				s.getAllOutboundStatuses()
+			}()
+		}
+
+		// Wait until at least one goroutine is inside GetOutboundStatus
+		// (and therefore all N are blocked on singleflight).
+		<-mock.ready
+
+		// Release all blocked goroutines.
+		close(mock.release)
+		wg.Wait()
+
+		// Singleflight should coalesce concurrent callers into a single gRPC call.
+		count := mock.callCount.Load()
+		assert.Equal(t, int32(1), count, "并发调用应被 singleflight 合并为 1 次 gRPC 调用，实际 %d 次", count)
+	})
+
+	t.Run("Concurrent calls all receive valid results", func(t *testing.T) {
+		mock := newGatedObservatoryClient([]*observatory.OutboundStatus{
+			{OutboundTag: "node-1", Alive: true, Delay: 50},
+			{OutboundTag: "node-2", Alive: true, Delay: 100},
+		})
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: mock,
+		}
+
+		const n = 10
+		results := make([][]OutboundStatusData, n)
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			idx := i
+			go func() {
+				defer wg.Done()
+				results[idx] = s.getAllOutboundStatuses()
+			}()
+		}
+
+		<-mock.ready
+		close(mock.release)
+		wg.Wait()
+
+		for i, r := range results {
+			assert.Len(t, r, 2, "goroutine %d 应收到 2 条状态", i)
+			assert.Equal(t, "node-1", r[0].Tag)
+		}
+	})
+}
+
+func TestObservatoryErrorCaching(t *testing.T) {
+	t.Run("Error result is cached within TTL", func(t *testing.T) {
+		mock := &errorObservatoryClient{}
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: mock,
+		}
+
+		// First call should hit gRPC and get error.
+		r1 := s.getAllOutboundStatuses()
+		assert.Equal(t, int32(1), mock.callCount.Load())
+		assert.Empty(t, r1, "错误时应返回空 slice")
+
+		// Second call within TTL should use cached empty result, not retry gRPC.
+		r2 := s.getAllOutboundStatuses()
+		assert.Equal(t, int32(1), mock.callCount.Load(), "TTL 内不应重试 gRPC")
+		assert.Empty(t, r2, "缓存的错误结果应返回空 slice")
+	})
+
+	t.Run("Error cache expires and retries gRPC", func(t *testing.T) {
+		mock := &errorObservatoryClient{}
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: mock,
+		}
+
+		// First call.
+		s.getAllOutboundStatuses()
+		assert.Equal(t, int32(1), mock.callCount.Load())
+
+		// Manually expire cache.
+		s.obsCacheMu.Lock()
+		s.obsCache = cachedObservatory{}
+		s.obsCacheMu.Unlock()
+
+		// Next call should retry gRPC.
+		s.getAllOutboundStatuses()
+		assert.Equal(t, int32(2), mock.callCount.Load(), "缓存过期后应重试 gRPC")
+	})
+
+	t.Run("Concurrent error calls are coalesced", func(t *testing.T) {
+		errMock := newGatedErrorObservatoryClient()
+		s := &Server{
+			config: config.Config{
+				Xray: config.XrayConfig{BalancerTag: "balancer"},
+			},
+			routingClient:     &MockRoutingClient{},
+			observatoryClient: errMock,
+		}
+
+		const n = 10
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func() {
+				defer wg.Done()
+				s.getAllOutboundStatuses()
+			}()
+		}
+
+		<-errMock.ready
+		close(errMock.release)
+		wg.Wait()
+
+		count := errMock.callCount.Load()
+		assert.Equal(t, int32(1), count, "并发错误调用应被 singleflight 合并为 1 次，实际 %d 次", count)
+	})
+}
+
+// gatedErrorObservatoryClient blocks GetOutboundStatus until release is closed,
+// then returns an error. Used for deterministic singleflight concurrency tests.
+type gatedErrorObservatoryClient struct {
+	ready     chan struct{}
+	release   chan struct{}
+	callCount atomic.Int32
+}
+
+func newGatedErrorObservatoryClient() *gatedErrorObservatoryClient {
+	return &gatedErrorObservatoryClient{
+		ready:   make(chan struct{}, 16),
+		release: make(chan struct{}),
+	}
+}
+
+func (c *gatedErrorObservatoryClient) GetOutboundStatus(_ context.Context, _ *observatorypb.GetOutboundStatusRequest, _ ...grpc.CallOption) (*observatorypb.GetOutboundStatusResponse, error) {
+	c.callCount.Add(1)
+	select {
+	case c.ready <- struct{}{}:
+	default:
+	}
+	<-c.release
+	return nil, fmt.Errorf("observatory unavailable")
 }

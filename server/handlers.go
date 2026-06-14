@@ -12,8 +12,9 @@ import (
 const apiTimeout = 5 * time.Second
 
 type CurrentOutboundData struct {
-	Current string `json:"current"`
-	Auto    bool   `json:"auto"`
+	Current    string `json:"current"`
+	Auto       bool   `json:"auto"`
+	ActiveNode string `json:"active_node,omitempty"` // 自动模式下实际使用的节点
 }
 
 type configResponse struct {

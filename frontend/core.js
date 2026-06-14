@@ -5,6 +5,7 @@ const XrayManager = {
     didInitialAutoSelect: false,
     fixedNodeOrder: [],
     pageReady: false,
+    isAutoMode: true, // 是否处于自动均衡模式
 };
 
 const $ = (id) => document.getElementById(id);
@@ -138,20 +139,35 @@ const UIManager = (function() {
             }
         },
 
-        updateCurrentDisplay: function(auto, current) {
+        updateCurrentDisplay: function(auto, current, activeNode) {
             const el = els.currentTag;
-            const stateKey = auto + '|' + current;
+            const stateKey = auto + '|' + current + '|' + (activeNode || '');
             if (el._lastState === stateKey) return;
             el._lastState = stateKey;
             if (!el._span) {
                 el.textContent = '';
                 el._span = document.createElement('span');
+                el._span.style.display = 'inline-flex';
+                el._span.style.alignItems = 'center';
+                el._span.style.gap = '0.375rem';
                 el.appendChild(el._span);
             }
             const span = el._span;
             if (auto || !current) {
-                span.className = 'text-orange-300';
-                span.textContent = '🔄 自动均衡模式';
+                // 自动模式下显示实际使用的节点
+                if (activeNode) {
+                    span.className = 'text-orange-300';
+                    span.textContent = '';
+                    const arrow = document.createTextNode('自动均衡 →');
+                    const nodeSpan = document.createElement('span');
+                    nodeSpan.className = 'text-cyan-300 font-bold';
+                    nodeSpan.textContent = activeNode;
+                    span.appendChild(arrow);
+                    span.appendChild(nodeSpan);
+                } else {
+                    span.className = 'text-orange-300/70';
+                    span.textContent = '自动均衡 - 连接中...';
+                }
             } else {
                 span.className = 'text-green-300';
                 span.textContent = '✓ ' + current;

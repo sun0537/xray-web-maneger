@@ -33,6 +33,9 @@ var (
 // Throttle BPS warning logs to at most once every 5 minutes to avoid log spam
 // when Xray restarts and counters reset. Uses atomic CAS so at most one
 // goroutine wins the race and logs per interval window.
+// Note: These are package-level globals shared across test runs. If tests
+// exercise warnBPSOnce with t.Parallel() and manipulate bpsUplinkWarnLast /
+// bpsDownlinkWarnLast directly, they may interfere.
 var (
 	bpsUplinkWarnLast   atomic.Int64
 	bpsDownlinkWarnLast atomic.Int64
@@ -234,9 +237,13 @@ func (s *Server) getCombinedStats() (StatsData, error) {
 		}()
 		go func() {
 			defer wg.Done()
-			outboundStats = s.getAllOutboundStatuses(grpcCtx)
+			// getAllOutboundStatuses() writes to its internal singleflight cache;
+			// the returned slice is a defensive copy safe for this goroutine to hold.
+			outboundStats = s.getAllOutboundStatuses()
 		}()
 		wg.Wait()
+		// All goroutines finished; wg.Wait() establishes a happens-before edge,
+		// so outboundStats, queryResp, and sysResp are safely visible here.
 
 		failedSources := 0
 
@@ -270,17 +277,12 @@ func (s *Server) getCombinedStats() (StatsData, error) {
 			stats.Goroutines = int(sysResp.GetNumGoroutine())
 		}
 
-		if outboundStats == nil {
-			stats.Outbounds = []OutboundStatusData{}
-		} else {
-			stats.Outbounds = outboundStats
-		}
+		stats.Outbounds = outboundStats
 
 		// Only query and sys sources count as "failure" because observatory
-		// returning nil means "no data" (not an error). The cached
-		// Outbounds empty-slice path keeps the JSON shape stable.
+		// returning empty means "no data" (not an error).
 		if failedSources >= 2 {
-			return StatsData{}, fmt.Errorf("all data sources failed")
+			return StatsData{}, fmt.Errorf("stats and sys data sources failed")
 		}
 		return stats, nil
 	})
