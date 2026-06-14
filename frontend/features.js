@@ -102,18 +102,12 @@ const NodeManager = (function() {
                 (isCurrent ? 'border-cyan-400 current-indicator' : 'border-white/20');
 
             const inner = document.createElement('div');
-            inner.className = 'relative';
 
             if (isCurrent) {
-                const badge = document.createElement('div');
-                badge.className = 'absolute top-2 right-2 bg-cyan-500/90 text-white px-2 py-1 rounded-md text-xs font-bold flex items-center gap-1';
-                const dot = document.createElement('span');
-                dot.className = 'pulse-ring';
-                dot.textContent = '●';
-                badge.appendChild(dot);
-                badge.appendChild(document.createTextNode(' 当前'));
-                inner.appendChild(badge);
-                card.style.cursor = 'default';
+                // 自动模式下仍然允许点击切换到手动模式
+                if (!XrayManager.isAutoMode) {
+                    card.style.cursor = 'default';
+                }
             }
 
             const body = document.createElement('div');
@@ -131,23 +125,60 @@ const NodeManager = (function() {
             body.appendChild(tagDiv);
             body.appendChild(protoDiv);
 
+            const bottomRow = document.createElement('div');
+            bottomRow.className = 'flex items-center justify-between gap-2';
+
             const statusDiv = document.createElement('div');
             statusDiv.id = 'status-' + tag;
             statusDiv.className = 'flex items-center gap-2 text-xs text-white/70';
             statusDiv.textContent = '○ 正在 PING...';
 
+            bottomRow.appendChild(statusDiv);
+
+            if (isCurrent) {
+                const badge = document.createElement('div');
+                badge.className = 'bg-cyan-500/90 text-white px-2 py-1 rounded-md text-xs font-bold flex items-center gap-1';
+                const dot = document.createElement('span');
+                dot.className = 'pulse-ring';
+                dot.textContent = '●';
+                badge.appendChild(dot);
+                // 自动模式和手动模式显示不同的标签
+                const badgeText = XrayManager.isAutoMode ? ' 自动' : ' 当前';
+                badge.appendChild(document.createTextNode(badgeText));
+                bottomRow.appendChild(badge);
+            }
+
             inner.appendChild(body);
-            inner.appendChild(statusDiv);
+            inner.appendChild(bottomRow);
             card.appendChild(inner);
 
-            if (!isCurrent) {
-                card.addEventListener('click', function() {
-                    NetworkManager.applyOutboundChange(tag, tag, { reload: true });
-                });
+            // 在自动模式下，点击当前节点可以切换为手动模式
+            // 在手动模式下，点击当前节点不做任何操作
+            if (!isCurrent || XrayManager.isAutoMode) {
+                async function handleSwitch() {
+                    try {
+                        if (isCurrent && XrayManager.isAutoMode) {
+                            const msg = '将退出自动均衡模式，手动锁定到节点: ' + tag + '\n之后需手动切换节点或点击「自动均衡」恢复。确认？';
+                            const confirmed = typeof showModal === 'function'
+                                ? await showModal(msg)
+                                : confirm(msg);
+                            if (!confirmed) return;
+                        }
+                        await NetworkManager.applyOutboundChange(tag, tag, { reload: true });
+                    } catch (e) {
+                        console.error('切换节点失败:', e);
+                        try {
+                            if (typeof NotificationManager !== 'undefined' && NotificationManager.showNotification) {
+                                NotificationManager.showNotification('切换节点失败: ' + (e.message || String(e) || '未知错误'), 'error');
+                            }
+                        } catch (_) { /* swallow */ }
+                    }
+                }
+                card.addEventListener('click', handleSwitch);
                 card.addEventListener('keydown', function(e) {
                     if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
-                        NetworkManager.applyOutboundChange(tag, tag, { reload: true });
+                        handleSwitch();
                     }
                 });
             }
@@ -384,9 +415,9 @@ window.addEventListener('load', function() {
 
     const uiElements = UIManager.getElements();
     if (uiElements.resetBtn) {
-        uiElements.resetBtn.addEventListener('click', function() {
+        uiElements.resetBtn.addEventListener('click', async function() {
             if (typeof NetworkManager !== 'undefined') {
-                NetworkManager.applyOutboundChange('', '自动均衡', { reload: true });
+                await NetworkManager.applyOutboundChange('', '自动均衡', { reload: true });
             }
         });
     }

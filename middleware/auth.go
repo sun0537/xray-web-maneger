@@ -34,26 +34,37 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 			}
 
 			user, pass, ok := r.BasicAuth()
-			if !ok ||
-				subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 ||
+			if !ok {
+				// 浏览器尚未缓存凭证（用户还没输入密码），不计入失败次数
+				writeUnauthorized(w)
+				return
+			}
+			if subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 ||
 				subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
 				authLimiter.recordAuthFailure(ip)
-				w.Header().Set("WWW-Authenticate", `Basic realm="Xray Manager"`)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				body, err := json.Marshal(ErrorResponse{
-					Error:     "未授权 (Unauthorized)",
-					ErrorType: "auth",
-				})
-				if err != nil {
-					_, _ = w.Write([]byte(`{"error":"未授权 (Unauthorized)","error_type":"auth"}`))
-				} else {
-					_, _ = w.Write(body)
-				}
+				writeUnauthorized(w)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+// writeUnauthorized sends a 401 response with a WWW-Authenticate challenge
+// and a JSON error body. Used by both the "no credentials" and "wrong
+// credentials" paths in BasicAuth.
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="Xray Manager"`)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	body, err := json.Marshal(ErrorResponse{
+		Error:     "未授权 (Unauthorized)",
+		ErrorType: "auth",
+	})
+	if err != nil {
+		_, _ = w.Write([]byte(`{"error":"未授权 (Unauthorized)","error_type":"auth"}`))
+	} else {
+		_, _ = w.Write(body)
 	}
 }
 

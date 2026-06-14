@@ -96,7 +96,7 @@ func main() {
 		}
 		log.Printf("连接失败 (尝试 %d/%d): 当前状态 %s", i+1, maxRetries, conn.GetState())
 		if i < maxRetries-1 {
-			// Exponential backoff: 1s, 2s
+			// Exponential backoff: 1s, 2s (last attempt has no delay)
 			backoff := time.Duration(1<<i) * time.Second
 			time.Sleep(backoff)
 		}

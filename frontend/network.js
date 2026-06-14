@@ -48,16 +48,20 @@ const NetworkManager = (function() {
                 if (!response.ok) throw new Error('获取当前出站失败');
                 const data = await safeJson(response);
                 XrayManager.prevCurrentOutbound = XrayManager.currentOutbound;
-                if (data.auto || !data.current) {
-                    XrayManager.currentOutbound = '';
+                XrayManager.isAutoMode = data.auto || !data.current;
+                if (XrayManager.isAutoMode) {
+                    // 自动模式下，使用 active_node 作为当前节点
+                    XrayManager.currentOutbound = data.active_node || '';
                 } else {
                     XrayManager.currentOutbound = data.current;
                 }
-                UIManager.updateCurrentDisplay(data.auto, data.current);
+                UIManager.updateCurrentDisplay(data.auto, data.current, data.active_node);
                 return data;
             } catch (error) {
                 console.error('Error loading current outbound:', error);
                 UIManager.updateErrorDisplay();
+                XrayManager.isAutoMode = true;
+                XrayManager.currentOutbound = '';
                 return { auto: true, current: '' };
             }
         },

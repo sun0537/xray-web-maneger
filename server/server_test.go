@@ -197,7 +197,7 @@ func (m *MockObservatoryClient) GetOutboundStatus(_ context.Context, _ *observat
 func TestGetAllOutboundStatuses(t *testing.T) {
 	t.Run("Returns mapped statuses", func(t *testing.T) {
 		s := &Server{observatoryClient: &MockObservatoryClientWithStatus{}}
-		result := s.getAllOutboundStatuses(context.Background())
+		result := s.getAllOutboundStatuses()
 
 		assert.Len(t, result, 3)
 		assert.Equal(t, "node-1", result[0].Tag)
@@ -209,7 +209,7 @@ func TestGetAllOutboundStatuses(t *testing.T) {
 
 	t.Run("Returns empty on empty status", func(t *testing.T) {
 		s := &Server{observatoryClient: &MockObservatoryClient{}}
-		result := s.getAllOutboundStatuses(context.Background())
+		result := s.getAllOutboundStatuses()
 		assert.Empty(t, result)
 	})
 }

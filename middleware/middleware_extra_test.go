@@ -175,6 +175,44 @@ func TestBasicAuthFailure(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
 	})
 
+	t.Run("Missing credentials do not count as failures", func(t *testing.T) {
+		resetAuthLimiter()
+		authLimiter.limit = 2
+
+		// 多次无凭证请求不应触发限流
+		for i := 0; i < 10; i++ {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.RemoteAddr = "10.0.0.88:1234"
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		}
+
+		// 无凭证请求后，错误密码仍然应该正常计入
+		req := httptest.NewRequest("GET", "/", nil)
+		req.SetBasicAuth("admin", "wrong")
+		req.RemoteAddr = "10.0.0.88:1234"
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+		// 第二次错误密码：记录失败并封锁（但本次请求仍返回 401）
+		req = httptest.NewRequest("GET", "/", nil)
+		req.SetBasicAuth("admin", "wrong")
+		req.RemoteAddr = "10.0.0.88:1234"
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+		// 第三次请求：已被封锁，返回 429
+		req = httptest.NewRequest("GET", "/", nil)
+		req.SetBasicAuth("admin", "wrong")
+		req.RemoteAddr = "10.0.0.88:1234"
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+	})
+
 	t.Run("Blocked after too many failures", func(t *testing.T) {
 		resetAuthLimiter()
 		authLimiter.limit = 2
