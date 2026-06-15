@@ -133,6 +133,7 @@ func TestBasicAuthDisabled(t *testing.T) {
 
 func TestBasicAuthSuccess(t *testing.T) {
 	resetAuthLimiter()
+	resetNoCredLimiter()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("protected"))
@@ -150,6 +151,7 @@ func TestBasicAuthSuccess(t *testing.T) {
 
 func TestBasicAuthFailure(t *testing.T) {
 	resetAuthLimiter()
+	resetNoCredLimiter()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -168,6 +170,7 @@ func TestBasicAuthFailure(t *testing.T) {
 
 	t.Run("No credentials", func(t *testing.T) {
 		resetAuthLimiter()
+		resetNoCredLimiter()
 		req := httptest.NewRequest("GET", "/", nil)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
@@ -175,11 +178,12 @@ func TestBasicAuthFailure(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
 	})
 
-	t.Run("Missing credentials do not count as failures", func(t *testing.T) {
+	t.Run("Missing credentials do not count as auth failures", func(t *testing.T) {
 		resetAuthLimiter()
+		resetNoCredLimiter()
 		authLimiter.limit = 2
 
-		// 多次无凭证请求不应触发限流
+		// 多次无凭证请求不应触发 auth 限流
 		for i := 0; i < 10; i++ {
 			req := httptest.NewRequest("GET", "/", nil)
 			req.RemoteAddr = "10.0.0.88:1234"
@@ -213,8 +217,32 @@ func TestBasicAuthFailure(t *testing.T) {
 		assert.Equal(t, http.StatusTooManyRequests, rr.Code)
 	})
 
+	t.Run("No-credential requests are rate limited independently", func(t *testing.T) {
+		resetAuthLimiter()
+		resetNoCredLimiter()
+		noCredLimiter.limit = 3
+
+		// 前 3 次无凭证请求应返回 401
+		for i := 0; i < 3; i++ {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.RemoteAddr = "10.0.0.77:1234"
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		}
+
+		// 第 4 次无凭证请求应触发限流返回 429
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "10.0.0.77:1234"
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+		assert.Equal(t, "60", rr.Header().Get("Retry-After"))
+	})
+
 	t.Run("Blocked after too many failures", func(t *testing.T) {
 		resetAuthLimiter()
+		resetNoCredLimiter()
 		authLimiter.limit = 2
 
 		for i := 0; i < 2; i++ {

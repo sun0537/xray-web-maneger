@@ -35,7 +35,19 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 
 			user, pass, ok := r.BasicAuth()
 			if !ok {
-				// 浏览器尚未缓存凭证（用户还没输入密码），不计入失败次数
+				// 浏览器尚未缓存凭证（用户还没输入密码），使用独立限流防止无限探测
+				if noCredLimiter.isAuthBlocked(ip) {
+					w.Header().Set("Retry-After", "60")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTooManyRequests)
+					body, _ := json.Marshal(ErrorResponse{
+						Error:     "请求过于频繁，请稍后再试",
+						ErrorType: "rate_limit",
+					})
+					_, _ = w.Write(body)
+					return
+				}
+				noCredLimiter.recordAuthFailure(ip)
 				writeUnauthorized(w)
 				return
 			}
@@ -96,6 +108,17 @@ var authLimiter = simpleAuthRateLimit{
 	states:      make(map[string]*authState),
 	limit:       5,
 	blockWindow: 5 * time.Minute,
+}
+
+// noCredLimiter rate-limits requests that arrive without any Authorization
+// header. This prevents attackers from using unauthenticated requests to
+// probe the service without triggering the stricter auth-failure limiter.
+// The limit is intentionally more lenient than authLimiter because browser
+// first-loads and legitimate health checks may legitimately lack credentials.
+var noCredLimiter = simpleAuthRateLimit{
+	states:      make(map[string]*authState),
+	limit:       30,
+	blockWindow: 1 * time.Minute,
 }
 
 func (a *simpleAuthRateLimit) isAuthBlocked(ip string) bool {
@@ -163,19 +186,25 @@ func startAuthLimiterCleanup() {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				authLimiter.Lock()
-				now := time.Now()
-				for ip, st := range authLimiter.states {
-					if !st.blockedAt.IsZero() && now.Sub(st.blockedAt) >= authLimiter.blockWindow {
-						delete(authLimiter.states, ip)
-						continue
-					}
-					if st.blockedAt.IsZero() && now.Sub(st.lastAttempt) >= authLimiter.blockWindow {
-						delete(authLimiter.states, ip)
-					}
-				}
-				authLimiter.Unlock()
+				cleanupRateLimiter(&authLimiter)
+				cleanupRateLimiter(&noCredLimiter)
 			}
 		}
 	}()
+}
+
+// cleanupRateLimiter removes expired entries from a rate limiter.
+func cleanupRateLimiter(a *simpleAuthRateLimit) {
+	a.Lock()
+	defer a.Unlock()
+	now := time.Now()
+	for ip, st := range a.states {
+		if !st.blockedAt.IsZero() && now.Sub(st.blockedAt) >= a.blockWindow {
+			delete(a.states, ip)
+			continue
+		}
+		if st.blockedAt.IsZero() && now.Sub(st.lastAttempt) >= a.blockWindow {
+			delete(a.states, ip)
+		}
+	}
 }
