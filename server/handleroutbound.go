@@ -113,42 +113,31 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
 	defer cancel()
 
-	type routingResult struct {
-		resp *routingpb.GetBalancerInfoResponse
-		err  error
-	}
-	ch := make(chan routingResult, 1)
-	go func() {
-		resp, err := s.routingClient.GetBalancerInfo(ctx, &routingpb.GetBalancerInfoRequest{
-			Tag: s.config.Xray.BalancerTag,
-		})
-		ch <- routingResult{resp, err}
-	}()
-
-	// 自动模式下，使用 observatory 数据找到最佳可用节点（与 routing 调用并行执行）
-	activeNode := s.findBestAvailableNode()
-
-	result := <-ch
-	if result.err != nil {
-		errorMsg := fmt.Sprintf("获取负载均衡器信息失败: %v", result.err)
+	resp, err := s.routingClient.GetBalancerInfo(ctx, &routingpb.GetBalancerInfoRequest{
+		Tag: s.config.Xray.BalancerTag,
+	})
+	if err != nil {
+		errorMsg := fmt.Sprintf("获取负载均衡器信息失败: %v", err)
 		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %s", s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), errorMsg)
 		jsonError(w, errorMsg, http.StatusBadGateway, "bad_gateway")
 		return
 	}
-	if result.resp == nil {
+	if resp == nil {
 		jsonError(w, "收到空的负载均衡器响应", http.StatusBadGateway, "bad_gateway")
 		return
 	}
 
 	current := ""
 	auto := true
-	if result.resp.Balancer != nil && result.resp.Balancer.Override != nil && result.resp.Balancer.Override.Target != "" {
-		current = result.resp.Balancer.Override.Target
+	if resp.Balancer != nil && resp.Balancer.Override != nil && resp.Balancer.Override.Target != "" {
+		current = resp.Balancer.Override.Target
 		auto = false
 	}
 
-	if !auto {
-		activeNode = ""
+	// 自动模式下，使用 observatory 缓存数据找到最佳可用节点（微秒级，无需并行）
+	activeNode := ""
+	if auto {
+		activeNode = s.findBestAvailableNode()
 	}
 
 	jsonResponse(w, CurrentOutboundData{Current: current, Auto: auto, ActiveNode: activeNode}, http.StatusOK)
@@ -198,14 +187,19 @@ func (s *Server) findBestAvailableNode() string {
 	return firstAlive
 }
 
-// excludedTagsSnapshot returns the cached excluded-tags set (NOT a copy),
-// or nil if the cache is stale. Caller must NOT hold excludedTagsMu and
-// MUST NOT modify the returned map — the cache owns it directly.
+// excludedTagsSnapshot returns a defensive copy of the cached excluded-tags
+// set, or nil if the cache is stale. The caller owns the returned map and
+// may modify it freely without corrupting the shared cache.
 func (s *Server) excludedTagsSnapshot() map[string]struct{} {
 	s.excludedTagsMu.RLock()
 	defer s.excludedTagsMu.RUnlock()
 	if time.Since(s.excludedTagsCache.timestamp) < observatoryCacheTTL {
-		return s.excludedTagsCache.tags
+		orig := s.excludedTagsCache.tags
+		snapshot := make(map[string]struct{}, len(orig))
+		for k, v := range orig {
+			snapshot[k] = v
+		}
+		return snapshot
 	}
 	return nil
 }
@@ -385,7 +379,9 @@ func (s *Server) getAllOutboundStatuses() []OutboundStatusData {
 	}
 	s.obsCacheMu.RUnlock()
 
-	result, _, _ := s.obsGroup.Do(observatoryGroupKey, func() (any, error) {
+	// Singleflight: only the winning goroutine executes the gRPC call and
+	// writes to cache. All losers block until the winner finishes.
+	s.obsGroup.Do(observatoryGroupKey, func() (any, error) {
 		ctx, cancel := context.WithTimeout(s.backgroundContext(), apiTimeout)
 		defer cancel()
 
@@ -395,12 +391,12 @@ func (s *Server) getAllOutboundStatuses() []OutboundStatusData {
 				log.Printf("警告: GetOutboundStatus 失败: %v", err)
 			}
 			s.updateObsCache([]OutboundStatusData{})
-			return []OutboundStatusData{}, nil
+			return nil, nil
 		}
 
 		if resp.Status == nil || resp.Status.Status == nil {
 			s.updateObsCache([]OutboundStatusData{})
-			return []OutboundStatusData{}, nil
+			return nil, nil
 		}
 
 		statuses := make([]OutboundStatusData, 0, len(resp.Status.Status))
@@ -413,18 +409,28 @@ func (s *Server) getAllOutboundStatuses() []OutboundStatusData {
 		}
 
 		s.updateObsCache(statuses)
-
-		return statuses, nil
+		return nil, nil
 	})
 
-	statuses, ok := result.([]OutboundStatusData)
-	if !ok {
-		// Should not happen since singleflight func always returns []OutboundStatusData.
-		return []OutboundStatusData{}
+	// Singleflight completed and updated the cache; read directly from cache
+	// instead of copying from the Do() result, avoiding a redundant allocation.
+	if snapshot := s.obsSnapshot(); snapshot != nil {
+		return snapshot
 	}
+	// Should be extremely rare (cache expired between write and read).
+	return []OutboundStatusData{}
+}
 
-	// Return a copy so callers cannot corrupt the shared cache.
-	snapshot := make([]OutboundStatusData, len(statuses))
-	copy(snapshot, statuses)
-	return snapshot
+// obsSnapshot returns a defensive copy of the cached observatory data,
+// or nil if the cache is stale.
+func (s *Server) obsSnapshot() []OutboundStatusData {
+	s.obsCacheMu.RLock()
+	defer s.obsCacheMu.RUnlock()
+	if time.Since(s.obsCache.timestamp) < observatoryCacheTTL {
+		cached := s.obsCache.data
+		snapshot := make([]OutboundStatusData, len(cached))
+		copy(snapshot, cached)
+		return snapshot
+	}
+	return nil
 }

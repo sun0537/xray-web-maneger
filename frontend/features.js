@@ -160,7 +160,7 @@ const NodeManager = (function() {
                         if (isCurrent && XrayManager.isAutoMode) {
                             const msg = '将退出自动均衡模式，手动锁定到节点: ' + tag + '\n之后需手动切换节点或点击「自动均衡」恢复。确认？';
                             const confirmed = typeof showModal === 'function'
-                                ? await showModal(msg)
+                                ? await showModal(msg).catch(() => false)
                                 : confirm(msg);
                             if (!confirmed) return;
                         }

@@ -29,8 +29,10 @@ func TestParseProtocol(t *testing.T) {
 		{"vmess outbound", "xray.proxy.vmess.outbound.Config", "vmess"},
 		{"vless outbound", "xray.proxy.vless.outbound.Config", "vless"},
 		{"shadowsocks", "xray.proxy.shadowsocks.outbound.Config", "shadowsocks"},
+		{"trojan", "xray.proxy.trojan.outbound.Config", "trojan"},
 		{"freedom", "xray.proxy.freedom.Config", "freedom"},
 		{"short type", "a.b", "b"},
+		{"three segments", "a.b.c", "c"},
 		{"single part", "single", "single"},
 		{"empty type", "", "unknown"},
 	}

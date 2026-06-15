@@ -153,6 +153,12 @@ func resetAuthLimiter() {
 	authLimiter.Unlock()
 }
 
+func resetNoCredLimiter() {
+	noCredLimiter.Lock()
+	noCredLimiter.states = make(map[string]*authState)
+	noCredLimiter.Unlock()
+}
+
 func TestCheckOriginCORSHeaders(t *testing.T) {
 	okHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
