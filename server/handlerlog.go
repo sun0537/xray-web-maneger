@@ -17,12 +17,36 @@ import (
 )
 
 const (
-	logDefaultLines = 500
-	logMaxLines     = 2000
-	logMaxFileSize  = 10 * 1024 * 1024
-	logTimeout      = 10 * time.Second
-	maxSearchLength = 256
+	logDefaultLines   = 500
+	logMaxLines       = 2000
+	logMaxFileSize    = 10 * 1024 * 1024
+	logTimeout        = 10 * time.Second
+	maxSearchLength   = 256
+	truncationMarker  = "[日志输出过大，已截断]"
 )
+
+// trimLinesToBytes keeps the most-recent lines that fit within maxBytes,
+// prepending a truncation marker when older lines were dropped. A single
+// line that exceeds maxBytes is returned as-is to avoid corrupting its
+// content with a partial truncation.
+func trimLinesToBytes(lines []string, maxBytes int64) []string {
+	if maxBytes <= 0 || len(lines) == 0 {
+		return lines
+	}
+	start := len(lines)
+	var used int64
+	for i := len(lines) - 1; i >= 0; i-- {
+		used += int64(len(lines[i]))
+		if used > maxBytes {
+			break
+		}
+		start = i
+	}
+	if start > 0 && start < len(lines) {
+		return append([]string{truncationMarker}, lines[start:]...)
+	}
+	return lines
+}
 
 // ringPool reuses []string slices for the log ring buffer to reduce GC pressure.
 var ringPool = sync.Pool{
@@ -193,27 +217,8 @@ func readLogFile(ctx context.Context, filePath string, maxLines int, search stri
 		copy(result[n:], ring[:pos])
 	}
 
-	// Enforce maxBytes: keep most-recent lines that fit within the limit.
-	// Walk backwards from the newest line, counting only kept bytes.
-	if maxBytes > 0 && len(result) > 0 {
-		var total int64
-		kept := len(result)
-		exceeded := false
-		for i := len(result) - 1; i >= 0; i-- {
-			lineBytes := int64(len(result[i]))
-			if total+lineBytes > maxBytes {
-				exceeded = true
-				break
-			}
-			total += lineBytes
-			kept = i
-		}
-		if exceeded && kept > 0 && kept < len(result) {
-			truncated := make([]string, 0, len(result)-kept+1)
-			truncated = append(truncated, "[日志输出过大，已截断]")
-			truncated = append(truncated, result[kept:]...)
-			result = truncated
-		}
+	if maxBytes > 0 {
+		result = trimLinesToBytes(result, maxBytes)
 	}
 	return result, nil
 }

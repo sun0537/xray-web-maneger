@@ -197,6 +197,121 @@ func TestReadLogFileMaxBytesTruncation(t *testing.T) {
 	})
 }
 
+func TestTrimLinesToBytes(t *testing.T) {
+	t.Run("maxBytes zero returns unchanged", func(t *testing.T) {
+		lines := []string{"a", "b"}
+		got := trimLinesToBytes(lines, 0)
+		assert.Equal(t, lines, got)
+	})
+
+	t.Run("maxBytes negative returns unchanged", func(t *testing.T) {
+		lines := []string{"a", "b"}
+		got := trimLinesToBytes(lines, -1)
+		assert.Equal(t, lines, got)
+	})
+
+	t.Run("empty slice returns unchanged", func(t *testing.T) {
+		got := trimLinesToBytes(nil, 100)
+		assert.Nil(t, got)
+	})
+
+	t.Run("all lines fit — no marker", func(t *testing.T) {
+		lines := []string{"hello", "world"} // 5+5=10 bytes
+		got := trimLinesToBytes(lines, 10)
+		assert.Equal(t, lines, got)
+	})
+
+	t.Run("all lines fit with room to spare", func(t *testing.T) {
+		lines := []string{"a", "b"} // 1+1=2 bytes
+		got := trimLinesToBytes(lines, 100)
+		assert.Equal(t, lines, got)
+	})
+
+	t.Run("keeps most-recent lines that fit", func(t *testing.T) {
+		// "aa"(2) + "bb"(2) + "cc"(2) = 6 bytes total.
+		// maxBytes=5: "bb"+"cc"=4 fits, "aa"+"bb"+"cc"=6 doesn't.
+		lines := []string{"aa", "bb", "cc"}
+		got := trimLinesToBytes(lines, 5)
+		assert.Equal(t, []string{truncationMarker, "bb", "cc"}, got)
+	})
+
+	t.Run("only last line fits", func(t *testing.T) {
+		lines := []string{"aaa", "bbb", "c"} // 3+3+1=7
+		// maxBytes=1: only "c"(1) fits.
+		got := trimLinesToBytes(lines, 1)
+		assert.Equal(t, []string{truncationMarker, "c"}, got)
+	})
+
+	t.Run("single line fits — no marker", func(t *testing.T) {
+		got := trimLinesToBytes([]string{"hello"}, 100)
+		assert.Equal(t, []string{"hello"}, got)
+	})
+
+	t.Run("single line exactly at limit — no marker", func(t *testing.T) {
+		got := trimLinesToBytes([]string{"hello"}, 5) // 5 bytes
+		assert.Equal(t, []string{"hello"}, got)
+	})
+
+	t.Run("single line exceeds maxBytes — kept as-is, no marker", func(t *testing.T) {
+		lines := []string{"a very long single line"}
+		got := trimLinesToBytes(lines, 2)
+		// Only one line; start would stay at len(lines), so condition fails.
+		assert.Equal(t, lines, got)
+	})
+
+	t.Run("exact boundary — all lines just fit", func(t *testing.T) {
+		lines := []string{"ab", "cd", "ef"} // 2+2+2=6
+		got := trimLinesToBytes(lines, 6)
+		assert.Equal(t, lines, got)
+	})
+
+	t.Run("off-by-one: one byte over forces drop of oldest", func(t *testing.T) {
+		lines := []string{"ab", "cd", "ef"} // 2+2+2=6
+		got := trimLinesToBytes(lines, 5)
+		assert.Equal(t, []string{truncationMarker, "cd", "ef"}, got)
+	})
+
+	t.Run("mixed-length lines", func(t *testing.T) {
+		lines := []string{"x", "yyyy", "zz"} // 1+4+2=7
+		// maxBytes=6: "yyyy"+"zz"=6 fits, all 7 doesn't.
+		got := trimLinesToBytes(lines, 6)
+		assert.Equal(t, []string{truncationMarker, "yyyy", "zz"}, got)
+	})
+
+	t.Run("multibyte UTF-8 lines", func(t *testing.T) {
+		// "你好" = 6 bytes, "世界" = 6 bytes
+		lines := []string{"你好", "世界"}
+		got := trimLinesToBytes(lines, 6)
+		assert.Equal(t, []string{truncationMarker, "世界"}, got)
+	})
+
+	t.Run("multibyte UTF-8 all fit", func(t *testing.T) {
+		lines := []string{"你好", "世界"}
+		got := trimLinesToBytes(lines, 12)
+		assert.Equal(t, lines, got)
+	})
+
+	t.Run("many lines — drops correct number of oldest", func(t *testing.T) {
+		// 5 lines of 10 bytes each = 50 total.
+		lines := []string{
+			"aaaaaaaaaa", // 10
+			"bbbbbbbbbb", // 10
+			"cccccccccc", // 10
+			"dddddddddd", // 10
+			"eeeeeeeeee", // 10
+		}
+		// maxBytes=30: last 3 lines (30 bytes) fit.
+		got := trimLinesToBytes(lines, 30)
+		assert.Equal(t, []string{truncationMarker, "cccccccccc", "dddddddddd", "eeeeeeeeee"}, got)
+	})
+
+	t.Run("does not mutate input slice", func(t *testing.T) {
+		lines := []string{"aa", "bb", "cc"}
+		_ = trimLinesToBytes(lines, 3)
+		assert.Equal(t, []string{"aa", "bb", "cc"}, lines, "original must be unchanged")
+	})
+}
+
 func TestHandleGetLogs(t *testing.T) {
 	t.Run("Log type none returns empty", func(t *testing.T) {
 		s := &Server{
