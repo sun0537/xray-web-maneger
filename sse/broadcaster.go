@@ -35,6 +35,7 @@ type Broadcaster struct {
 	interval    time.Duration
 	stopCh      chan struct{}
 	loopDone    chan struct{}
+	loopGen     uint64
 	stopped     bool
 	idleTimer   *time.Timer
 	stopOnce    sync.Once
@@ -78,6 +79,7 @@ func (b *Broadcaster) Stop() {
 	b.stopOnce.Do(func() {
 		b.mu.Lock()
 		b.stopped = true
+		b.loopGen++
 		if b.idleTimer != nil {
 			b.idleTimer.Stop()
 			b.idleTimer = nil
@@ -126,6 +128,31 @@ func (b *Broadcaster) Subscribe() chan any {
 	wasEmpty := len(b.subscribers) == 0 && b.stopCh == nil
 	b.subscribers[ch] = struct{}{}
 	if wasEmpty {
+		// Wait for any previous loop to fully exit before starting a new
+		// one. Without this, the idle-timer path (Unsubscribe → timer →
+		// close(stopCh); stopCh=nil) can race with Subscribe: the old
+		// loop hasn't exited yet but stopCh is already nil, so Subscribe
+		// starts a second loop → duplicate fetches and broadcasts.
+		//
+		// The generation counter disambiguates what happened while we
+		// waited without the lock: if it changed, another Subscribe
+		// already started a new loop, or Stop() was called — either way,
+		// we must not start a second loop.
+		if b.loopDone != nil {
+			gen := b.loopGen
+			done := b.loopDone
+			b.mu.Unlock()
+			<-done
+			b.mu.Lock()
+			if gen != b.loopGen {
+				if !b.stopped {
+					return ch
+				}
+				delete(b.subscribers, ch)
+				close(ch)
+				return ch
+			}
+		}
 		b.stopCh = make(chan struct{})
 		b.loopDone = make(chan struct{})
 		go b.loop(b.stopCh, b.loopDone)

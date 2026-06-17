@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,6 +89,15 @@ type StatsData struct {
 }
 
 func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
+	// Recover from panics in the SSE handler. The outer Recovery middleware
+	// would try to write a JSON error body into the SSE stream, corrupting
+	// it. Instead, just log and let the connection close.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("严重: SSE handler panic: %v\nstack: %s", rec, debug.Stack())
+		}
+	}()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
