@@ -355,13 +355,13 @@ func TestHandleGetOutboundsStatus(t *testing.T) {
 func TestHandleStatsSSE(t *testing.T) {
 	sseMgr := sse.NewManager()
 
-	fetchFn := func() (any, error) {
+	fetchFn := func() (StatsData, error) {
 		return StatsData{
 			Uplink: 1024, Downlink: 2048, Uptime: 100,
 			SysMem: 50000000, Goroutines: 10, Outbounds: []OutboundStatusData{},
 		}, nil
 	}
-	broadcaster := sse.NewBroadcaster(fetchFn, nil, 100*time.Millisecond)
+	broadcaster := sse.NewBroadcaster(fetchFn, nil, degradedStatsData, 100*time.Millisecond)
 	defer broadcaster.Stop()
 
 	s := &Server{

@@ -13,7 +13,13 @@ type cachedHealth struct {
 	status    string
 	timestamp time.Time
 	stale     bool // Set to true when cache should be refreshed immediately
+	ttl       time.Duration // 成功=healthCacheTTL，失败=healthCacheFailTTL
 }
+
+const (
+	healthCacheTTL     = 10 * time.Second
+	healthCacheFailTTL = 3 * time.Second
+)
 
 type HealthStatus struct {
 	Status         string `json:"status"`
@@ -30,12 +36,12 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	s.healthMu.RUnlock()
 
 	xrayStatus := cached.status
-	if cached.stale || time.Since(cached.timestamp) > 10*time.Second {
+	if cached.stale || time.Since(cached.timestamp) > cached.ttl {
 		result, err, _ := s.healthGroup.Do(healthGroupKey, func() (any, error) {
 			s.healthMu.RLock()
 			fresh := s.healthCache
 			s.healthMu.RUnlock()
-			if !fresh.stale && time.Since(fresh.timestamp) <= 10*time.Second {
+			if !fresh.stale && time.Since(fresh.timestamp) <= fresh.ttl {
 				return fresh.status, nil
 			}
 
@@ -52,14 +58,13 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 		})
 		if status, ok := result.(string); ok {
 			xrayStatus = status
-			cacheTime := time.Now()
+			ttl := healthCacheTTL
 			if err != nil {
 				log.Printf("健康检查: Xray gRPC 不可达: %v", err)
-				// 健康检查失败时缩短缓存有效期至 3 秒 (10-7)，以便更快重试。
-				cacheTime = time.Now().Add(-7 * time.Second)
+				ttl = healthCacheFailTTL
 			}
 			s.healthMu.Lock()
-			s.healthCache = cachedHealth{status: xrayStatus, timestamp: cacheTime, stale: false}
+			s.healthCache = cachedHealth{status: xrayStatus, timestamp: time.Now(), stale: false, ttl: ttl}
 			s.healthMu.Unlock()
 		}
 	}

@@ -10,14 +10,6 @@ import (
 	"time"
 )
 
-// RawEvent wraps pre-marshaled JSON bytes. fetchFn returns this so that
-// enrichFn can work with the raw JSON without re-parsing, and dedup can
-// compare the underlying bytes. Subscribers receive either a RawEvent
-// (normal data) or a map (degraded event).
-type RawEvent struct {
-	JSON []byte
-}
-
 // Broadcaster periodically fetches data and fans it out to all subscribers.
 // The background polling loop starts lazily on the first Subscribe() call.
 // When the last subscriber unsubscribes, the loop continues running for
@@ -27,11 +19,12 @@ type RawEvent struct {
 // NOTE: fetchFn is called WITHOUT holding b.mu, so long-running fetches
 // (e.g. gRPC calls with multi-second timeouts) will NOT block Subscribe()
 // or Unsubscribe(). The mutex is only held during the fan-out phase.
-type Broadcaster struct {
+type Broadcaster[T any] struct {
 	mu          sync.Mutex
-	subscribers map[chan any]struct{}
-	fetchFn     func() (any, error)
-	enrichFn    func(data, prev any, tickAt, prevAt time.Time) any
+	subscribers map[chan T]struct{}
+	fetchFn     func() (T, error)
+	enrichFn    func(data, prev T, tickAt, prevAt time.Time) T
+	degradedFn  func() T
 	interval    time.Duration
 	stopCh      chan struct{}
 	loopDone    chan struct{}
@@ -41,7 +34,8 @@ type Broadcaster struct {
 	stopOnce    sync.Once
 
 	lastMu        sync.RWMutex
-	lastBroadcast any
+	lastBroadcast T
+	hasLast       bool
 
 	droppedMsgs atomic.Int64
 }
@@ -55,27 +49,30 @@ const broadcasterIdleTimeout = 10 * time.Second
 // invoked with the current and previous raw payloads plus their tick
 // timestamps (captured before the fetch), so it can derive additional
 // fields (e.g. BPS from cumulative counters) using the real elapsed time.
+// degradedFn constructs a degraded payload of type T pushed to subscribers
+// after maxConsecutiveErrors consecutive fetch failures.
 // The loop starts on first Subscribe() — no need to call Start() manually.
-func NewBroadcaster(fetchFn func() (any, error), enrichFn func(data, prev any, tickAt, prevAt time.Time) any, interval time.Duration) *Broadcaster {
-	return &Broadcaster{
-		subscribers: make(map[chan any]struct{}),
+func NewBroadcaster[T any](fetchFn func() (T, error), enrichFn func(data, prev T, tickAt, prevAt time.Time) T, degradedFn func() T, interval time.Duration) *Broadcaster[T] {
+	return &Broadcaster[T]{
+		subscribers: make(map[chan T]struct{}),
 		fetchFn:     fetchFn,
 		enrichFn:    enrichFn,
+		degradedFn:  degradedFn,
 		interval:    interval,
 	}
 }
 
 // LastBroadcast returns the most recent enriched broadcast payload.
-// Returns nil if no successful broadcast has occurred yet.
+// Returns false if no successful broadcast has occurred yet.
 // Safe for concurrent use.
-func (b *Broadcaster) LastBroadcast() any {
+func (b *Broadcaster[T]) LastBroadcast() (T, bool) {
 	b.lastMu.RLock()
 	defer b.lastMu.RUnlock()
-	return b.lastBroadcast
+	return b.lastBroadcast, b.hasLast
 }
 
 // Stop shuts down the background loop (if running) and closes all subscriber channels.
-func (b *Broadcaster) Stop() {
+func (b *Broadcaster[T]) Stop() {
 	b.stopOnce.Do(func() {
 		b.mu.Lock()
 		b.stopped = true
@@ -101,7 +98,7 @@ func (b *Broadcaster) Stop() {
 		for ch := range b.subscribers {
 			close(ch)
 		}
-		b.subscribers = make(map[chan any]struct{})
+		b.subscribers = make(map[chan T]struct{})
 		b.mu.Unlock()
 	})
 }
@@ -109,8 +106,8 @@ func (b *Broadcaster) Stop() {
 // Subscribe returns a channel that receives broadcast payloads.
 // If this is the first subscriber and the loop is not running, the background
 // polling loop starts. Call Unsubscribe when done to clean up.
-func (b *Broadcaster) Subscribe() chan any {
-	ch := make(chan any, 5)
+func (b *Broadcaster[T]) Subscribe() chan T {
+	ch := make(chan T, 5)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -164,7 +161,7 @@ func (b *Broadcaster) Subscribe() chan any {
 // for the same channel is safe. Channel closing is handled exclusively by
 // Stop() to keep lifecycle management in one place; consumers should rely on
 // their own context (e.g. request context) for cancellation.
-func (b *Broadcaster) Unsubscribe(ch chan any) {
+func (b *Broadcaster[T]) Unsubscribe(ch chan T) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.subscribers, ch)
@@ -192,7 +189,7 @@ func (b *Broadcaster) Unsubscribe(ch chan any) {
 // a degraded event is pushed to subscribers so they know data is stale.
 const maxConsecutiveErrors = 3
 
-func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
+func (b *Broadcaster[T]) loop(stopCh chan struct{}, loopDone chan struct{}) {
 	defer close(loopDone)
 	defer func() {
 		if r := recover(); r != nil {
@@ -203,8 +200,9 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 	ticker := time.NewTicker(b.interval)
 	defer ticker.Stop()
 
-	var lastSnapshot any
+	var lastSnapshot T
 	var lastAt time.Time
+	var prevJSON []byte // cached marshaled bytes of previous tick for dedup
 	consecutiveErrors := 0
 
 	for {
@@ -213,7 +211,7 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 			return
 		case <-ticker.C:
 			tickAt := time.Now()
-			data, err := func() (result any, err error) {
+			data, err := func() (result T, err error) {
 				defer func() {
 					if r := recover(); r != nil {
 						err = fmt.Errorf("fetchFn panic: %v", r)
@@ -225,9 +223,19 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 				consecutiveErrors++
 				log.Printf("警告: 统计数据获取失败 (连续第%d次): %v", consecutiveErrors, err)
 				if consecutiveErrors == maxConsecutiveErrors {
-					degradedEvent := map[string]any{"degraded": true, "error": "数据源不可用"}
+					degradedEvent, ok := func() (degraded T, ok bool) {
+						defer func() {
+							if r := recover(); r != nil {
+								log.Printf("严重: degradedFn panic: %v", r)
+							}
+						}()
+						return b.degradedFn(), true
+					}()
+					if !ok {
+						continue
+					}
 					b.mu.Lock()
-					chans := make([]chan any, 0, len(b.subscribers))
+					chans := make([]chan T, 0, len(b.subscribers))
 					for ch := range b.subscribers {
 						chans = append(chans, ch)
 					}
@@ -244,27 +252,16 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 
 			consecutiveErrors = 0
 
-			// Dedup is scoped to RawEvent (byte-level JSON comparison) for the
-			// hot stats path, and falls back to json.Marshal for arbitrary
-			// payload types so dedup remains correct for non-RawEvent sources.
-			// We also fall back when only one side is RawEvent, because Go's
-			// type system allows fetchFn to switch payload types across ticks
-			// (defensive: the assumption is that fetchFn returns a stable
-			// type, but we don't want dedup to silently disappear on a switch).
-			if lastSnapshot != nil {
-				currRaw, currIsRaw := data.(RawEvent)
-				prevRaw, prevIsRaw := lastSnapshot.(RawEvent)
-				if currIsRaw && prevIsRaw {
-					if bytes.Equal(currRaw.JSON, prevRaw.JSON) {
-						continue
-					}
-				} else {
-					currJSON, err1 := json.Marshal(data)
-					prevJSON, err2 := json.Marshal(lastSnapshot)
-					if err1 == nil && err2 == nil && bytes.Equal(currJSON, prevJSON) {
-						continue
-					}
-				}
+			// Dedup via JSON marshaling: marshal only the current payload and
+			// compare against the cached prevJSON (from the previous tick).
+			// This avoids re-marshaling lastSnapshot every tick.
+			currJSON, marshalErr := json.Marshal(data)
+			if marshalErr != nil {
+				prevJSON = nil
+			} else if prevJSON != nil && bytes.Equal(currJSON, prevJSON) {
+				continue
+			} else {
+				prevJSON = currJSON
 			}
 
 			broadcast := data
@@ -276,12 +273,13 @@ func (b *Broadcaster) loop(stopCh chan struct{}, loopDone chan struct{}) {
 
 			b.lastMu.Lock()
 			b.lastBroadcast = broadcast
+			b.hasLast = true
 			b.lastMu.Unlock()
 
 			// Copy subscribers under lock, send outside lock to avoid
 			// blocking Subscribe/Unsubscribe during channel sends.
 			b.mu.Lock()
-			chans := make([]chan any, 0, len(b.subscribers))
+			chans := make([]chan T, 0, len(b.subscribers))
 			for ch := range b.subscribers {
 				chans = append(chans, ch)
 			}

@@ -2,8 +2,10 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: [
-    "./index.html", // <-- 确保这一行存在
-    "./app.js"      // <-- 确保这一行存在
+    "./index.html",
+    "./core.js",
+    "./features.js",
+    "./network.js"
   ],
   theme: {
     extend: {},
