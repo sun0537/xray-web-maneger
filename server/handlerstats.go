@@ -88,6 +88,12 @@ type StatsData struct {
 	Degraded    bool                 `json:"degraded,omitempty"`
 }
 
+// degradedStatsData returns a StatsData payload marking the data source as
+// unavailable. Used by the broadcaster after consecutive fetch failures.
+func degradedStatsData() StatsData {
+	return StatsData{Degraded: true, Outbounds: []OutboundStatusData{}}
+}
+
 func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	// Recover from panics in the SSE handler. The outer Recovery middleware
 	// would try to write a JSON error body into the SSE stream, corrupting
@@ -148,7 +154,7 @@ func (s *Server) handleStatsSSE(w http.ResponseWriter, r *http.Request) {
 	defer lifetime.Stop()
 
 	var initialJSON []byte
-	if cached := s.broadcaster.LastBroadcast(); cached != nil {
+	if cached, ok := s.broadcaster.LastBroadcast(); ok {
 		b, marshalErr := json.Marshal(cached)
 		if marshalErr != nil {
 			log.Printf("SSE 缓存数据序列化失败: %v", marshalErr)
@@ -309,8 +315,8 @@ func (s *Server) getCombinedStats() (StatsData, error) {
 
 // computeBPS enriches a StatsData payload with upload/download BPS values
 // computed from the delta between the current snapshot and prev.
-func computeBPS(data, prev any, tickAt, prevAt time.Time) any {
-	if prev == nil || prevAt.IsZero() {
+func computeBPS(data, prev StatsData, tickAt, prevAt time.Time) StatsData {
+	if prevAt.IsZero() {
 		return data
 	}
 	elapsed := tickAt.Sub(prevAt).Seconds()
@@ -318,23 +324,16 @@ func computeBPS(data, prev any, tickAt, prevAt time.Time) any {
 		return data
 	}
 
-	curr, ok1 := data.(StatsData)
-	last, ok2 := prev.(StatsData)
-	if !ok1 || !ok2 {
-		log.Printf("警告: computeBPS 类型断言失败: data=%T, prev=%T", data, prev)
-		return data
+	data.UplinkBPS = float64(data.Uplink-prev.Uplink) / elapsed
+	if data.UplinkBPS < 0 {
+		warnBPSOnce(&bpsUplinkWarnLast, "警告: 上行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", data.UplinkBPS)
+		data.UplinkBPS = 0
+	}
+	data.DownlinkBPS = float64(data.Downlink-prev.Downlink) / elapsed
+	if data.DownlinkBPS < 0 {
+		warnBPSOnce(&bpsDownlinkWarnLast, "警告: 下行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", data.DownlinkBPS)
+		data.DownlinkBPS = 0
 	}
 
-	curr.UplinkBPS = float64(curr.Uplink-last.Uplink) / elapsed
-	if curr.UplinkBPS < 0 {
-		warnBPSOnce(&bpsUplinkWarnLast, "警告: 上行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.UplinkBPS)
-		curr.UplinkBPS = 0
-	}
-	curr.DownlinkBPS = float64(curr.Downlink-last.Downlink) / elapsed
-	if curr.DownlinkBPS < 0 {
-		warnBPSOnce(&bpsDownlinkWarnLast, "警告: 下行 BPS 为负 (%.0f)，可能 Xray 已重启导致计数器归零", curr.DownlinkBPS)
-		curr.DownlinkBPS = 0
-	}
-
-	return curr
+	return data
 }

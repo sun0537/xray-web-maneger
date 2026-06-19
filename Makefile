@@ -42,7 +42,7 @@ build: deps frontend
 
 run:
 	@echo "Running in dev mode (using external frontend/ and config.yaml)..."
-	go run . -dev -c config.yaml
+	go run . -dev -config config.yaml
 
 test:
 	go test ./... -v

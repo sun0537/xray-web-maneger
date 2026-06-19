@@ -28,7 +28,7 @@ type Server struct {
 	observatoryClient observatorypb.ObservatoryServiceClient
 	statsClient       statspb.StatsServiceClient
 	sseManager        *sse.Manager
-	broadcaster       *sse.Broadcaster
+	broadcaster       *sse.Broadcaster[StatsData]
 	startTime         time.Time
 	shutdownCtx       context.Context
 	shutdownCancel    context.CancelFunc
@@ -76,9 +76,9 @@ func NewServer(cfg config.Config, conn *grpc.ClientConn, sseMgr *sse.Manager, st
 		shutdownCancel:    shutdownCancel,
 	}
 
-	s.broadcaster = sse.NewBroadcaster(func() (any, error) {
+	s.broadcaster = sse.NewBroadcaster(func() (StatsData, error) {
 		return s.getCombinedStats()
-	}, computeBPS, sseUpdateInterval)
+	}, computeBPS, degradedStatsData, sseUpdateInterval)
 
 	return s
 }

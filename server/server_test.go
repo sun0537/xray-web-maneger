@@ -17,7 +17,6 @@ import (
 	observatorypb "xray-web-manager/internal/xray-proto/app/observatory/command"
 	"xray-web-manager/internal/xray-proto/common/serial"
 	"xray-web-manager/middleware"
-	"xray-web-manager/sse"
 )
 
 func TestParseProtocol(t *testing.T) {
@@ -70,9 +69,8 @@ func TestComputeBPS(t *testing.T) {
 
 		result := computeBPS(curr, last, now, prev)
 
-		enriched := result.(StatsData)
-		assert.InDelta(t, 512.0, enriched.UplinkBPS, 0.1)
-		assert.InDelta(t, 1024.0, enriched.DownlinkBPS, 0.1)
+		assert.InDelta(t, 512.0, result.UplinkBPS, 0.1)
+		assert.InDelta(t, 1024.0, result.DownlinkBPS, 0.1)
 	})
 
 	t.Run("Counter reset clamps to zero", func(t *testing.T) {
@@ -81,14 +79,13 @@ func TestComputeBPS(t *testing.T) {
 
 		result := computeBPS(curr, last, now, prev)
 
-		enriched := result.(StatsData)
-		assert.Equal(t, 0.0, enriched.UplinkBPS)
-		assert.Equal(t, 0.0, enriched.DownlinkBPS)
+		assert.Equal(t, 0.0, result.UplinkBPS)
+		assert.Equal(t, 0.0, result.DownlinkBPS)
 	})
 
 	t.Run("First fetch returns data unchanged", func(t *testing.T) {
 		data := StatsData{Uplink: 100}
-		result := computeBPS(data, nil, now, time.Time{})
+		result := computeBPS(data, StatsData{}, now, time.Time{})
 		assert.Equal(t, data, result)
 	})
 
@@ -96,12 +93,6 @@ func TestComputeBPS(t *testing.T) {
 		data := StatsData{Uplink: 100}
 		result := computeBPS(data, data, now, now)
 		assert.Equal(t, data, result)
-	})
-
-	t.Run("Type mismatch returns data unchanged", func(t *testing.T) {
-		bad := sse.RawEvent{JSON: []byte("bad")}
-		result := computeBPS(bad, bad, now, prev)
-		assert.Equal(t, bad, result)
 	})
 }
 

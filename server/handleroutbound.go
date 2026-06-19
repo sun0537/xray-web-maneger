@@ -75,28 +75,12 @@ func parseProtocol(settings *serial.TypedMessage) string {
 	if settings == nil || settings.Type == "" {
 		return "unknown"
 	}
-	s := settings.Type
-	// 查找第一个点
-	firstDot := strings.IndexByte(s, '.')
-	if firstDot < 0 {
-		// 没有点，返回整个字符串
-		return strings.ToLower(s)
+	parts := strings.Split(settings.Type, ".")
+	if len(parts) < 3 {
+		// 不足 3 段，返回最后一段
+		return strings.ToLower(parts[len(parts)-1])
 	}
-	// 查找第二个点
-	secondDot := strings.IndexByte(s[firstDot+1:], '.')
-	if secondDot < 0 {
-		// 只有一个点，返回最后一段
-		return strings.ToLower(s[firstDot+1:])
-	}
-	secondDot += firstDot + 1 // 转换为相对于原字符串的索引
-	// 查找第三个点
-	thirdDot := strings.IndexByte(s[secondDot+1:], '.')
-	if thirdDot < 0 {
-		// 没有第三个点，返回到结尾
-		return strings.ToLower(s[secondDot+1:])
-	}
-	// 有第三个点，提取第二段（索引2）
-	return strings.ToLower(s[secondDot+1 : secondDot+1+thirdDot])
+	return strings.ToLower(parts[2])
 }
 
 func isValidOutbound(protocolName string) bool {
