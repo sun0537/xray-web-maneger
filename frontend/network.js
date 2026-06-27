@@ -1,8 +1,17 @@
 let _sseEventSource = null;
+let _postInitTimer = null;
 
 const NetworkManager = (function() {
     return {
+        stopPostInitPolling: function() {
+            if (_postInitTimer) {
+                clearTimeout(_postInitTimer);
+                _postInitTimer = null;
+            }
+        },
+
         closeSSE: function() {
+            this.stopPostInitPolling();
             if (_sseEventSource) {
                 _sseEventSource.close();
                 _sseEventSource = null;
@@ -90,6 +99,7 @@ const NetworkManager = (function() {
         },
 
         initializePage: async function() {
+            this.stopPostInitPolling();
             XrayManager.pageReady = false;
 
             const results = await Promise.all([
@@ -145,6 +155,39 @@ const NetworkManager = (function() {
             }
 
             XrayManager.pageReady = true;
+
+            // 启动后初始化轮询：当 observatory 尚未探测完成时，定期刷新节点状态和当前出站
+            this.startPostInitPolling(orderedNodeData);
+        },
+
+        startPostInitPolling: function(nodes) {
+            this.stopPostInitPolling();
+            if (!nodes || nodes.length === 0) return;
+
+            const maxRounds = 10; // 最多轮询 10 次（50秒）
+            let round = 0;
+
+            const tick = async () => {
+                if (!XrayManager.pageReady || round >= maxRounds) return;
+                round++;
+
+                try {
+                    // 并行获取当前出站和节点状态
+                    const [, statuses] = await Promise.all([
+                        this.loadCurrentOutbound(),
+                        NodeManager.progressiveLoadStatuses(nodes)
+                    ]);
+
+                    // 有节点完成探测后停止轮询（SSE 会接管后续更新）
+                    if (NodeManager.findBestNode(statuses)) return;
+                } catch (e) {
+                    console.error('后初始化轮询出错:', e);
+                }
+
+                _postInitTimer = setTimeout(tick, 5000);
+            };
+
+            _postInitTimer = setTimeout(tick, 5000);
         }
     };
 })();
