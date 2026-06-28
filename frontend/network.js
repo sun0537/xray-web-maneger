@@ -144,9 +144,15 @@ const NetworkManager = (function() {
 
             const bestNode = NodeManager.findBestNode(allStatuses);
             if (bestNode && currentStatus.auto && !XrayManager.didInitialAutoSelect) {
-                const confirmed = await showModal('检测到更优节点: ' + bestNode.tag + ' (延迟: ' + bestNode.status.delay + 'ms)\n是否切换？');
-                if (confirmed) {
-                    await this.applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
+                // 仅当最佳节点与当前活跃节点不同时才弹窗
+                if (bestNode.tag !== currentStatus.active_node) {
+                    const confirmed = await showModal('检测到更优节点: ' + bestNode.tag + ' (延迟: ' + bestNode.status.delay + 'ms)\n是否切换？');
+                    if (confirmed) {
+                        await this.applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
+                    } else if (currentStatus.active_node) {
+                        // 取消：锁定到当前活跃节点，维持旧的节点选择
+                        await this.applyOutboundChange(currentStatus.active_node, currentStatus.active_node, { reload: false });
+                    }
                     await this.loadCurrentOutbound();
                     NodeManager.renderOutboundCards(orderedNodeData);
                     await NodeManager.progressiveLoadStatuses(orderedNodeData);
