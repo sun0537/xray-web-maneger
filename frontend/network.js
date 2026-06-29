@@ -101,6 +101,7 @@ const NetworkManager = (function() {
         initializePage: async function() {
             this.stopPostInitPolling();
             XrayManager.pageReady = false;
+            XrayManager.didInitialAutoSelect = false;
 
             const results = await Promise.all([
                 this.loadCurrentOutbound(),
