@@ -428,7 +428,6 @@ window.addEventListener('load', function() {
             if (refreshing || typeof NetworkManager === 'undefined') return;
             refreshing = true;
             try {
-                XrayManager.didInitialAutoSelect = true;
                 await NetworkManager.initializePage();
             } finally {
                 refreshing = false;
