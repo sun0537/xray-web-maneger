@@ -145,16 +145,15 @@ const NetworkManager = (function() {
 
             const bestNode = NodeManager.findBestNode(allStatuses);
             if (bestNode && currentStatus.auto && !XrayManager.didInitialAutoSelect) {
-                // 仅当最佳节点与当前活跃节点不同时才弹窗
                 if (bestNode.tag !== currentStatus.active_node) {
-                    const confirmed = await showModal('检测到更优节点: ' + bestNode.tag + ' (延迟: ' + bestNode.status.delay + 'ms)\n是否切换？');
+                    const confirmed = await showModal('是否切换到负载均衡模式，使用延迟最低节点？\n' + bestNode.tag + ' (延迟: ' + bestNode.status.delay + 'ms)');
                     if (confirmed) {
-                        await this.applyOutboundChange(bestNode.tag, bestNode.tag, { reload: false });
-                    } else if (currentStatus.active_node) {
-                        // 取消：锁定到当前活跃节点，维持旧的节点选择
-                        await this.applyOutboundChange(currentStatus.active_node, currentStatus.active_node, { reload: false });
+                        // 确认：切换到负载均衡模式，自动选择延迟最低节点
+                        await this.applyOutboundChange('', '自动均衡', { reload: false });
                     }
-                    await this.loadCurrentOutbound();
+                    // 取消：不做任何改变，保持原节点
+                    XrayManager.isAutoMode = currentStatus.auto;
+                    XrayManager.currentOutbound = currentStatus.auto ? (currentStatus.active_node || '') : (currentStatus.current || '');
                     NodeManager.renderOutboundCards(orderedNodeData);
                     await NodeManager.progressiveLoadStatuses(orderedNodeData);
                 }
