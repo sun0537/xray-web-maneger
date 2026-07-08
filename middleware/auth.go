@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -15,7 +14,11 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler { return next }
 	}
 
-	startAuthLimiterCleanup()
+	startCleanupLoop(&authCleanupMu, &authCleanupStarted, &authCleanupStop,
+		2*time.Minute, func() {
+			cleanupRateLimiter(&authLimiter)
+			cleanupRateLimiter(&noCredLimiter)
+		})
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -23,13 +26,7 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 
 			if authLimiter.isAuthBlocked(ip) {
 				w.Header().Set("Retry-After", "300")
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusTooManyRequests)
-				body, _ := json.Marshal(ErrorResponse{
-					Error:     "认证失败次数过多，请 5 分钟后再试",
-					ErrorType: "auth_rate_limit",
-				})
-				_, _ = w.Write(body)
+				WriteJSONError(w, "认证失败次数过多，请 5 分钟后再试", http.StatusTooManyRequests, "auth_rate_limit")
 				return
 			}
 
@@ -38,13 +35,7 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 				// 浏览器尚未缓存凭证（用户还没输入密码），使用独立限流防止无限探测
 				if noCredLimiter.isAuthBlocked(ip) {
 					w.Header().Set("Retry-After", "60")
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusTooManyRequests)
-					body, _ := json.Marshal(ErrorResponse{
-						Error:     "请求过于频繁，请稍后再试",
-						ErrorType: "rate_limit",
-					})
-					_, _ = w.Write(body)
+					WriteJSONError(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests, "rate_limit")
 					return
 				}
 				noCredLimiter.recordAuthFailure(ip)
@@ -67,22 +58,10 @@ func BasicAuth(username, password string) func(http.Handler) http.Handler {
 // credentials" paths in BasicAuth.
 func writeUnauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Basic realm="Xray Manager"`)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	body, err := json.Marshal(ErrorResponse{
-		Error:     "未授权 (Unauthorized)",
-		ErrorType: "auth",
-	})
-	if err != nil {
-		_, _ = w.Write([]byte(`{"error":"未授权 (Unauthorized)","error_type":"auth"}`))
-	} else {
-		_, _ = w.Write(body)
-	}
+	WriteJSONError(w, "未授权 (Unauthorized)", http.StatusUnauthorized, "auth")
 }
 
-// maxTrackedAuthIPs caps the number of unique IPs tracked for auth failures,
-// preventing unbounded memory growth from distributed brute-force attacks.
-const maxTrackedAuthIPs = 10_000
+// maxTrackedIPs is defined in middleware.go and shared across rate limiters.
 
 // authState tracks the auth-failure state for a single IP. Embedding both
 // timestamps in a single value lets the limiter use one map instead of three,
@@ -144,7 +123,7 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 
 	st, tracked := a.states[ip]
 	if !tracked {
-		if len(a.states) >= maxTrackedAuthIPs {
+		if len(a.states) >= maxTrackedIPs {
 			// Evict a random entry to make room. True LRU eviction would
 			// require O(n) scan; random eviction is O(1) and good enough
 			// for a security rate limiter where the exact victim doesn't matter.
@@ -168,30 +147,6 @@ func (a *simpleAuthRateLimit) recordAuthFailure(ip string) {
 var authCleanupMu sync.Mutex
 var authCleanupStarted bool
 var authCleanupStop chan struct{}
-
-func startAuthLimiterCleanup() {
-	authCleanupMu.Lock()
-	defer authCleanupMu.Unlock()
-	if authCleanupStarted {
-		return
-	}
-	authCleanupStarted = true
-	authCleanupStop = make(chan struct{})
-	stopCh := authCleanupStop // capture locally to avoid data race in select
-	go func() {
-		ticker := time.NewTicker(2 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				cleanupRateLimiter(&authLimiter)
-				cleanupRateLimiter(&noCredLimiter)
-			}
-		}
-	}()
-}
 
 // cleanupRateLimiter removes expired entries from a rate limiter.
 func cleanupRateLimiter(a *simpleAuthRateLimit) {

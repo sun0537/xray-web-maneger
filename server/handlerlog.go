@@ -119,13 +119,14 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	case "journal":
 		lines, err = readJournalLog(ctx, cfg.Journal, maxLines, search, s.config.Log.MaxBytes)
 	default:
-		jsonError(w, "不支持的日志类型: "+cfg.Type, http.StatusBadRequest, "validation")
+		log.Printf("不支持的日志类型: %s [请求来源: %s]", cfg.Type, middleware.ClientIPFromContext(r))
+		jsonError(w, "不支持的日志类型", http.StatusBadRequest, "validation")
 		return
 	}
 
 	if err != nil {
 		log.Printf("读取日志失败 [来源: %s, 请求来源: %s]: %v", cfg.Type, middleware.ClientIPFromContext(r), err)
-		jsonError(w, "读取日志失败: "+err.Error(), http.StatusInternalServerError, "log_read")
+		jsonError(w, "读取日志失败", http.StatusInternalServerError, "log_read")
 		return
 	}
 

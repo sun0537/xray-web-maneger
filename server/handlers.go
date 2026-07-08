@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 
 	"xray-web-manager/middleware"
@@ -43,14 +44,22 @@ func jsonResponse(w http.ResponseWriter, data any, statusCode int) {
 }
 
 func jsonError(w http.ResponseWriter, message string, statusCode int, errorType string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	body, err := json.Marshal(middleware.ErrorResponse{Error: message, ErrorType: errorType})
-	if err != nil {
-		log.Printf("JSON 错误响应序列化失败: %v", err)
-		body = []byte(`{"error":"internal error","error_type":"server"}`)
+	middleware.WriteJSONError(w, message, statusCode, errorType)
+}
+
+// cloneMap returns a shallow copy of m. Returns nil if m is nil.
+func cloneMap[K comparable, V any](m map[K]V) map[K]V {
+	if m == nil {
+		return nil
 	}
-	if _, err := w.Write(body); err != nil {
-		log.Printf("JSON 错误响应写入失败: %v", err)
+	c := make(map[K]V, len(m))
+	for k, v := range m {
+		c[k] = v
 	}
+	return c
+}
+
+// cloneSlice returns a shallow copy of s using slices.Clone.
+func cloneSlice[T any](s []T) []T {
+	return slices.Clone(s)
 }

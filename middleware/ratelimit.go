@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
@@ -13,9 +12,6 @@ type slidingWindow struct {
 	windowStart time.Time
 }
 
-// maxTrackedRateIPs caps the number of unique IPs tracked for rate limiting,
-// preventing unbounded memory growth from distributed attacks.
-const maxTrackedRateIPs = 10_000
 
 type rateLimiter struct {
 	sync.Mutex
@@ -35,33 +31,17 @@ var limiterStarted bool
 var limiterStop chan struct{}
 
 func InitRateLimiter() {
-	limiterMu.Lock()
-	defer limiterMu.Unlock()
-	if limiterStarted {
-		return
-	}
-	limiterStarted = true
-	limiterStop = make(chan struct{})
-	stopCh := limiterStop // capture locally to avoid data race in select
-	go func() {
-		ticker := time.NewTicker(2 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				limiter.Lock()
-				limiter.cleanupStaleKeys(time.Now())
-				limiter.Unlock()
-			}
-		}
-	}()
+	startCleanupLoop(&limiterMu, &limiterStarted, &limiterStop,
+		2*time.Minute, func() {
+			limiter.Lock()
+			limiter.cleanupStaleKeys(time.Now())
+			limiter.Unlock()
+		})
 }
 
 // StopCleanup stops both the rate limiter and auth limiter cleanup goroutines.
 // It also resets the "started" flags so a subsequent InitRateLimiter /
-// startAuthLimiterCleanup call (e.g. in tests) can restart the goroutines
+// startCleanupLoop call (e.g. in tests) can restart the goroutines
 // cleanly instead of being a no-op.
 func StopCleanup() {
 	limiterMu.Lock()
@@ -89,13 +69,7 @@ func (rl *rateLimiter) middleware(trustProxy bool, next http.Handler) http.Handl
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r, trustProxy)
 		if !rl.checkAndRecord(ip) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			body, _ := json.Marshal(ErrorResponse{
-				Error:     "请求过于频繁，请稍后再试",
-				ErrorType: "rate_limit",
-			})
-			_, _ = w.Write(body)
+			WriteJSONError(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests, "rate_limit")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -110,7 +84,7 @@ func (rl *rateLimiter) checkAndRecord(ip string) bool {
 	sw, exists := rl.requests[ip]
 
 	if !exists {
-		if len(rl.requests) >= maxTrackedRateIPs {
+		if len(rl.requests) >= maxTrackedIPs {
 			rl.evictOldest()
 		}
 		rl.requests[ip] = &slidingWindow{currCount: 1, windowStart: now}

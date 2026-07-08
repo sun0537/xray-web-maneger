@@ -189,6 +189,18 @@ func (b *Broadcaster[T]) Unsubscribe(ch chan T) {
 // a degraded event is pushed to subscribers so they know data is stale.
 const maxConsecutiveErrors = 3
 
+// snapshotSubscribers returns a copy of the current subscriber channel list.
+// Callers can send to these channels without holding b.mu.
+func (b *Broadcaster[T]) snapshotSubscribers() []chan T {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	chans := make([]chan T, 0, len(b.subscribers))
+	for ch := range b.subscribers {
+		chans = append(chans, ch)
+	}
+	return chans
+}
+
 func (b *Broadcaster[T]) loop(stopCh chan struct{}, loopDone chan struct{}) {
 	defer close(loopDone)
 	defer func() {
@@ -234,12 +246,7 @@ func (b *Broadcaster[T]) loop(stopCh chan struct{}, loopDone chan struct{}) {
 					if !ok {
 						continue
 					}
-					b.mu.Lock()
-					chans := make([]chan T, 0, len(b.subscribers))
-					for ch := range b.subscribers {
-						chans = append(chans, ch)
-					}
-					b.mu.Unlock()
+					chans := b.snapshotSubscribers()
 					for _, ch := range chans {
 						select {
 						case ch <- degradedEvent:
@@ -276,14 +283,7 @@ func (b *Broadcaster[T]) loop(stopCh chan struct{}, loopDone chan struct{}) {
 			b.hasLast = true
 			b.lastMu.Unlock()
 
-			// Copy subscribers under lock, send outside lock to avoid
-			// blocking Subscribe/Unsubscribe during channel sends.
-			b.mu.Lock()
-			chans := make([]chan T, 0, len(b.subscribers))
-			for ch := range b.subscribers {
-				chans = append(chans, ch)
-			}
-			b.mu.Unlock()
+			chans := b.snapshotSubscribers()
 
 			for _, ch := range chans {
 				select {
