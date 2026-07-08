@@ -5,7 +5,7 @@ const XrayManager = {
     didInitialAutoSelect: false,
     fixedNodeOrder: [],
     pageReady: false,
-    isAutoMode: true, // 是否处于自动均衡模式
+    isAutoMode: true,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -34,7 +34,40 @@ const STATUS_CLASSES = {
     },
 };
 
-const UIManager = (function() {
+const NOTIFICATION_BASE_CLASS = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-2xl z-50 transition-all duration-300';
+
+// --- DOM helpers ---
+
+function ensureSpan(el, inlineStyles) {
+    if (!el._span) {
+        el.textContent = '';
+        el._span = document.createElement('span');
+        if (inlineStyles) {
+            Object.assign(el._span.style, inlineStyles);
+        }
+        el.appendChild(el._span);
+    }
+    return el._span;
+}
+
+function clearRetryTimer(container) {
+    if (container._retryTimer) {
+        clearInterval(container._retryTimer);
+        container._retryTimer = null;
+    }
+}
+
+function createEmptyState(message, extraClass = '') {
+    const cls = `text-center ${extraClass}`.trim();
+    const div = document.createElement('div');
+    div.className = cls;
+    div.textContent = message;
+    return div;
+}
+
+// --- UI Manager ---
+
+const UIManager = (() => {
     const els = {
         uplink: $('stats-uplink'),
         downlink: $('stats-downlink'),
@@ -51,9 +84,9 @@ const UIManager = (function() {
     };
 
     return {
-        getElements: function() { return els; },
+        getElements: () => els,
 
-        updateStatsUI: function(data) {
+        updateStatsUI(data) {
             if (!data) return;
             els.uplink.textContent = formatBytes(data.uplink);
             els.downlink.textContent = formatBytes(data.downlink);
@@ -61,10 +94,10 @@ const UIManager = (function() {
             els.sysMem.textContent = formatBytes(data.sys_mem);
             els.goroutines.textContent = data.goroutines;
 
-            var upBps = typeof data.uplink_bps === 'number' ? data.uplink_bps : 0;
-            var downBps = typeof data.downlink_bps === 'number' ? data.downlink_bps : 0;
-            els.uplinkSpeed.textContent = upBps > 0 ? ('↑ ' + formatBytes(upBps) + '/s') : '';
-            els.downlinkSpeed.textContent = downBps > 0 ? ('↓ ' + formatBytes(downBps) + '/s') : '';
+            const upBps = typeof data.uplink_bps === 'number' ? data.uplink_bps : 0;
+            const downBps = typeof data.downlink_bps === 'number' ? data.downlink_bps : 0;
+            els.uplinkSpeed.textContent = upBps > 0 ? `↑ ${formatBytes(upBps)}/s` : '';
+            els.downlinkSpeed.textContent = downBps > 0 ? `↓ ${formatBytes(downBps)}/s` : '';
 
             if (data.degraded) {
                 els.uplink.title = '数据可能不完整 (部分数据源不可用)';
@@ -75,7 +108,7 @@ const UIManager = (function() {
             }
         },
 
-        updateAllCardStatuses: function(outbounds) {
+        updateAllCardStatuses(outbounds) {
             for (const s of outbounds) {
                 if (s && s.tag) {
                     this.updateCardStatus(s.tag, { alive: s.alive, delay: s.delay });
@@ -83,17 +116,17 @@ const UIManager = (function() {
             }
         },
 
-        updateCardStatus: function(tag, status) {
-            const statusEl = document.getElementById('status-' + tag);
+        updateCardStatus(tag, status) {
+            const statusEl = document.getElementById(`status-${tag}`);
             if (!statusEl) return;
             this.performUIUpdate(statusEl, status);
         },
 
-        performUIUpdate: function(statusEl, status) {
+        performUIUpdate(statusEl, status) {
             if (status && status.error !== 'not_found' && status.error !== 'fetch_failed') {
                 const alive = status.alive;
                 const delay = status.delay;
-                const stateKey = alive + '|' + delay;
+                const stateKey = `${alive}|${delay}`;
                 if (statusEl._lastState === stateKey) return;
                 statusEl._lastState = stateKey;
 
@@ -121,7 +154,7 @@ const UIManager = (function() {
                     statusEl._label.textContent = '检测中...';
                 } else {
                     theme = alive ? STATUS_CLASSES.alive : STATUS_CLASSES.dead;
-                    statusEl._label.textContent = (delay || 0) + ' ms';
+                    statusEl._label.textContent = `${delay || 0} ms`;
                 }
                 statusEl.className = theme.container;
                 statusEl._dotAnim.className = theme.dotAnim;
@@ -139,22 +172,13 @@ const UIManager = (function() {
             }
         },
 
-        updateCurrentDisplay: function(auto, current, activeNode) {
+        updateCurrentDisplay(auto, current, activeNode) {
             const el = els.currentTag;
-            const stateKey = auto + '|' + current + '|' + (activeNode || '');
+            const stateKey = `${auto}|${current}|${activeNode || ''}`;
             if (el._lastState === stateKey) return;
             el._lastState = stateKey;
-            if (!el._span) {
-                el.textContent = '';
-                el._span = document.createElement('span');
-                el._span.style.display = 'inline-flex';
-                el._span.style.alignItems = 'center';
-                el._span.style.gap = '0.375rem';
-                el.appendChild(el._span);
-            }
-            const span = el._span;
+            const span = ensureSpan(el, { display: 'inline-flex', alignItems: 'center', gap: '0.375rem' });
             if (auto || !current) {
-                // 自动模式下显示实际使用的节点
                 if (activeNode) {
                     span.className = 'text-orange-300';
                     span.textContent = '';
@@ -170,50 +194,49 @@ const UIManager = (function() {
                 }
             } else {
                 span.className = 'text-green-300';
-                span.textContent = '✓ ' + current;
+                span.textContent = `✓ ${current}`;
             }
         },
 
-        updateErrorDisplay: function() {
+        updateErrorDisplay() {
             const el = els.currentTag;
             if (el._lastState === 'error') return;
             el._lastState = 'error';
-            if (!el._span) {
-                el.textContent = '';
-                el._span = document.createElement('span');
-                el.appendChild(el._span);
-            }
-            el._span.className = 'text-red-300';
-            el._span.textContent = '✗ 获取失败';
+            const span = ensureSpan(el);
+            span.className = 'text-red-300';
+            span.textContent = '✗ 获取失败';
         }
     };
 })();
 
-const NotificationManager = (function() {
+// --- Notification Manager ---
+
+const NotificationManager = (() => {
     let notificationEl = null;
     let notificationTimer = null;
 
     return {
-        showNotification: function(message, type) {
+        showNotification(message, type) {
             if (!notificationEl) {
                 notificationEl = document.createElement('div');
                 notificationEl.setAttribute('role', 'alert');
-                notificationEl.className = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-2xl z-50 transition-all duration-300';
+                notificationEl.className = NOTIFICATION_BASE_CLASS;
                 notificationEl.style.display = 'none';
                 document.body.appendChild(notificationEl);
             }
             if (notificationTimer) clearTimeout(notificationTimer);
-            notificationEl.className = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-2xl z-50 transition-all duration-300 ' +
-                (type === 'success' ? 'bg-green-500' : 'bg-red-500');
+            notificationEl.className = `${NOTIFICATION_BASE_CLASS} ${type === 'success' ? 'bg-green-500' : 'bg-red-500'}`;
             notificationEl.textContent = message;
             notificationEl.style.display = '';
-            notificationTimer = setTimeout(function() { notificationEl.style.display = 'none'; }, 3000);
+            notificationTimer = setTimeout(() => { notificationEl.style.display = 'none'; }, 3000);
         }
     };
 })();
 
+// --- Modal ---
+
 function showModal(message) {
-    return new Promise(function(resolve) {
+    return new Promise((resolve) => {
         const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50';
 
@@ -247,28 +270,26 @@ function showModal(message) {
             resolve(result);
         }
 
-        cancelBtn.addEventListener('click', function() { cleanup(false); });
-        confirmBtn.addEventListener('click', function() { cleanup(true); });
-        overlay.addEventListener('click', function(e) {
+        cancelBtn.addEventListener('click', () => cleanup(false));
+        confirmBtn.addEventListener('click', () => cleanup(true));
+        overlay.addEventListener('click', (e) => {
             if (e.target === overlay) cleanup(false);
         });
     });
 }
 
+// --- Utilities ---
+
 async function safeJson(response) {
     const contentType = response.headers.get('content-type') || '';
-    if (contentType.indexOf('application/json') !== -1) {
+    if (contentType.includes('application/json')) {
         return await response.json();
     }
-    throw new Error('Server returned non-JSON response (' + response.status + ')');
+    throw new Error(`服务器返回非 JSON 响应 (${response.status})`);
 }
 
-function showRetryUI(container, message, retryFn, countdown) {
-    if (countdown === undefined) countdown = 5;
-    if (container._retryTimer) {
-        clearInterval(container._retryTimer);
-        container._retryTimer = null;
-    }
+function showRetryUI(container, message, retryFn, countdown = 5) {
+    clearRetryTimer(container);
     let remaining = countdown;
 
     container.innerHTML = '';
@@ -286,21 +307,19 @@ function showRetryUI(container, message, retryFn, countdown) {
     container.appendChild(wrapper);
 
     function updateDisplay() {
-        msgEl.textContent = '❌ ' + message;
-        retryBtn.textContent = '↻ 重试 (' + remaining + 's)';
+        msgEl.textContent = `❌ ${message}`;
+        retryBtn.textContent = `↻ 重试 (${remaining}s)`;
     }
 
     function doRetry() {
-        if (container._retryTimer) {
-            clearInterval(container._retryTimer);
-            container._retryTimer = null;
-        }
-        container.innerHTML = '<div class="text-white/70 text-center py-4 col-span-full">正在重试...</div>';
+        clearRetryTimer(container);
+        container.innerHTML = '';
+        container.appendChild(createEmptyState('正在重试...', 'col-span-full text-white/70 py-4'));
         retryFn();
     }
 
     updateDisplay();
-    container._retryTimer = setInterval(function() {
+    container._retryTimer = setInterval(() => {
         remaining--;
         if (remaining <= 0) {
             doRetry();
@@ -309,19 +328,16 @@ function showRetryUI(container, message, retryFn, countdown) {
         }
     }, 1000);
 
-    retryBtn.addEventListener('click', function() {
-        doRetry();
-    });
+    retryBtn.addEventListener('click', () => doRetry());
 }
 
-function formatBytes(bytes, decimals) {
-    if (decimals === undefined) decimals = 0;
+function formatBytes(bytes, decimals = 0) {
     if (typeof bytes !== 'number' || isNaN(bytes) || bytes < 0) return '0 Bytes';
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
 }
 
 function formatDuration(totalSeconds) {
@@ -335,9 +351,9 @@ function formatDuration(totalSeconds) {
     const minutes = Math.floor(remaining / 60);
     const seconds = remaining % 60;
     let result = '';
-    if (days > 0) result += days + 'd ';
-    if (hours > 0) result += hours + 'h ';
-    if (minutes > 0) result += minutes + 'm ';
-    if (seconds > 0) result += seconds + 's';
+    if (days > 0) result += `${days}d `;
+    if (hours > 0) result += `${hours}h `;
+    if (minutes > 0) result += `${minutes}m `;
+    if (seconds > 0) result += `${seconds}s`;
     return result.trim();
 }

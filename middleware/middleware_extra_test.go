@@ -358,7 +358,8 @@ func TestRateLimitTrustProxy(t *testing.T) {
 
 func TestStopCleanup(t *testing.T) {
 	InitRateLimiter()
-	startAuthLimiterCleanup()
+	startCleanupLoop(&authCleanupMu, &authCleanupStarted, &authCleanupStop,
+		2*time.Minute, func() {})
 
 	StopCleanup()
 

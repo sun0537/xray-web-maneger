@@ -44,9 +44,8 @@ func (s *Server) handleGetOutbounds(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.handlerClient.ListOutbounds(ctx, &handlerpb.ListOutboundsRequest{})
 	if err != nil {
-		errorMsg := fmt.Sprintf("无法获取出站列表: %v", err)
-		log.Printf("获取出站列表失败 [请求来源: %s]: %s", middleware.ClientIPFromContext(r), errorMsg)
-		jsonError(w, errorMsg, http.StatusInternalServerError, "server")
+		log.Printf("获取出站列表失败 [请求来源: %s]: %v", middleware.ClientIPFromContext(r), err)
+		jsonError(w, "获取出站列表失败", http.StatusInternalServerError, "server")
 		return
 	}
 	if resp == nil {
@@ -101,9 +100,8 @@ func (s *Server) handleGetCurrentOutbound(w http.ResponseWriter, r *http.Request
 		Tag: s.config.Xray.BalancerTag,
 	})
 	if err != nil {
-		errorMsg := fmt.Sprintf("获取负载均衡器信息失败: %v", err)
-		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %s", s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), errorMsg)
-		jsonError(w, errorMsg, http.StatusBadGateway, "bad_gateway")
+		log.Printf("获取当前出站失败 [负载均衡器: %s, 请求来源: %s]: %v", s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), err)
+		jsonError(w, "获取负载均衡器信息失败", http.StatusBadGateway, "bad_gateway")
 		return
 	}
 	if resp == nil {
@@ -178,12 +176,7 @@ func (s *Server) excludedTagsSnapshot() map[string]struct{} {
 	s.excludedTagsMu.RLock()
 	defer s.excludedTagsMu.RUnlock()
 	if time.Since(s.excludedTagsCache.timestamp) < observatoryCacheTTL {
-		orig := s.excludedTagsCache.tags
-		snapshot := make(map[string]struct{}, len(orig))
-		for k, v := range orig {
-			snapshot[k] = v
-		}
-		return snapshot
+		return cloneMap(s.excludedTagsCache.tags)
 	}
 	return nil
 }
@@ -241,13 +234,8 @@ func (s *Server) buildExcludedTags() map[string]struct{} {
 
 // updateExcludedTagsCache unconditionally writes tags into the excluded-tags cache.
 func (s *Server) updateExcludedTagsCache(tags map[string]struct{}) {
-	// Defensive copy: store a snapshot so the caller's map is decoupled from the cache.
-	snapshot := make(map[string]struct{}, len(tags))
-	for k, v := range tags {
-		snapshot[k] = v
-	}
 	s.excludedTagsMu.Lock()
-	s.excludedTagsCache = cachedExcludedTags{tags: snapshot, timestamp: time.Now()}
+	s.excludedTagsCache = cachedExcludedTags{tags: cloneMap(tags), timestamp: time.Now()}
 	s.excludedTagsMu.Unlock()
 }
 
@@ -259,9 +247,8 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 		io.Copy(io.Discard, r.Body)
-		errorMsg := fmt.Sprintf("无效的请求体: %v", err)
-		log.Printf("切换出站失败 [请求来源: %s, 解码错误]: %s", middleware.ClientIPFromContext(r), errorMsg)
-		jsonError(w, errorMsg, http.StatusBadRequest, "validation")
+		log.Printf("切换出站失败 [请求来源: %s, 解码错误]: %v", middleware.ClientIPFromContext(r), err)
+		jsonError(w, "无效的请求体", http.StatusBadRequest, "validation")
 		return
 	}
 
@@ -278,9 +265,8 @@ func (s *Server) handleSwitchOutbound(w http.ResponseWriter, r *http.Request) {
 		Target:      reqBody.OutboundTag,
 	})
 	if err != nil {
-		errorMsg := fmt.Sprintf("切换出站失败: %v", err)
-		log.Printf("切换出站失败 [目标: %s, 负载均衡器: %s, 请求来源: %s]: %s", reqBody.OutboundTag, s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), errorMsg)
-		jsonError(w, errorMsg, http.StatusInternalServerError, "server")
+		log.Printf("切换出站失败 [目标: %s, 负载均衡器: %s, 请求来源: %s]: %v", reqBody.OutboundTag, s.config.Xray.BalancerTag, middleware.ClientIPFromContext(r), err)
+		jsonError(w, "切换出站失败", http.StatusInternalServerError, "server")
 		return
 	}
 
@@ -329,8 +315,7 @@ const observatoryCacheTTL = 2 * time.Second
 // so the timestamp guard is unnecessary. Stores a defensive copy of the
 // slice so the caller's data is decoupled from the cache.
 func (s *Server) updateObsCache(data []OutboundStatusData) {
-	snapshot := make([]OutboundStatusData, len(data))
-	copy(snapshot, data)
+	snapshot := cloneSlice(data)
 	s.obsCacheMu.Lock()
 	s.obsCache = cachedObservatory{data: snapshot, timestamp: time.Now()}
 	s.obsCacheMu.Unlock()
@@ -356,10 +341,7 @@ func (s *Server) getAllOutboundStatuses() []OutboundStatusData {
 	if time.Since(s.obsCache.timestamp) < observatoryCacheTTL {
 		cached := s.obsCache.data
 		s.obsCacheMu.RUnlock()
-		// Return a copy so callers cannot corrupt the shared cache.
-		snapshot := make([]OutboundStatusData, len(cached))
-		copy(snapshot, cached)
-		return snapshot
+		return cloneSlice(cached)
 	}
 	s.obsCacheMu.RUnlock()
 
@@ -411,10 +393,7 @@ func (s *Server) obsSnapshot() []OutboundStatusData {
 	s.obsCacheMu.RLock()
 	defer s.obsCacheMu.RUnlock()
 	if time.Since(s.obsCache.timestamp) < observatoryCacheTTL {
-		cached := s.obsCache.data
-		snapshot := make([]OutboundStatusData, len(cached))
-		copy(snapshot, cached)
-		return snapshot
+		return cloneSlice(s.obsCache.data)
 	}
 	return nil
 }

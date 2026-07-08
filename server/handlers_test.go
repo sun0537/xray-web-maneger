@@ -75,7 +75,9 @@ func (m *MockHandlerClient) ListInbounds(ctx context.Context, in *handlerpb.List
 	return &handlerpb.ListInboundsResponse{}, nil
 }
 
-type MockStatsClient struct{}
+type MockStatsClient struct {
+	baseStatsClient
+}
 
 func (m *MockStatsClient) QueryStats(ctx context.Context, in *statspb.QueryStatsRequest, opts ...grpc.CallOption) (*statspb.QueryStatsResponse, error) {
 	return &statspb.QueryStatsResponse{
@@ -89,24 +91,49 @@ func (m *MockStatsClient) QueryStats(ctx context.Context, in *statspb.QueryStats
 func (m *MockStatsClient) GetSysStats(ctx context.Context, in *statspb.SysStatsRequest, opts ...grpc.CallOption) (*statspb.SysStatsResponse, error) {
 	return &statspb.SysStatsResponse{Uptime: 100, Sys: 50000000, NumGoroutine: 10}, nil
 }
-func (m *MockStatsClient) GetStats(ctx context.Context, in *statspb.GetStatsRequest, opts ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
+
+// baseRoutingClient provides no-op stubs for rarely-used RoutingServiceClient methods.
+// Embed in test mocks to avoid repeating identical return-nil-nil implementations.
+type baseRoutingClient struct{}
+
+func (baseRoutingClient) SubscribeRoutingStats(_ context.Context, _ *routingpb.SubscribeRoutingStatsRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
 	return nil, nil
 }
-func (m *MockStatsClient) GetStatsOnline(ctx context.Context, in *statspb.GetStatsRequest, opts ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
+func (baseRoutingClient) TestRoute(_ context.Context, _ *routingpb.TestRouteRequest, _ ...grpc.CallOption) (*routingpb.RoutingContext, error) {
 	return nil, nil
 }
-func (m *MockStatsClient) GetStatsOnlineIpList(ctx context.Context, in *statspb.GetStatsRequest, opts ...grpc.CallOption) (*statspb.GetStatsOnlineIpListResponse, error) {
+func (baseRoutingClient) AddRule(_ context.Context, _ *routingpb.AddRuleRequest, _ ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
 	return nil, nil
 }
-func (m *MockStatsClient) GetAllOnlineUsers(ctx context.Context, in *statspb.GetAllOnlineUsersRequest, opts ...grpc.CallOption) (*statspb.GetAllOnlineUsersResponse, error) {
+func (baseRoutingClient) RemoveRule(_ context.Context, _ *routingpb.RemoveRuleRequest, _ ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
 	return nil, nil
 }
-func (m *MockStatsClient) GetUsersStats(ctx context.Context, in *statspb.GetUsersStatsRequest, opts ...grpc.CallOption) (*statspb.GetUsersStatsResponse, error) {
+func (baseRoutingClient) ListRule(_ context.Context, _ *routingpb.ListRuleRequest, _ ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
+	return nil, nil
+}
+
+// baseStatsClient provides no-op stubs for rarely-used StatsServiceClient methods.
+type baseStatsClient struct{}
+
+func (baseStatsClient) GetStats(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
+	return nil, nil
+}
+func (baseStatsClient) GetStatsOnline(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
+	return nil, nil
+}
+func (baseStatsClient) GetStatsOnlineIpList(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsOnlineIpListResponse, error) {
+	return nil, nil
+}
+func (baseStatsClient) GetAllOnlineUsers(context.Context, *statspb.GetAllOnlineUsersRequest, ...grpc.CallOption) (*statspb.GetAllOnlineUsersResponse, error) {
+	return nil, nil
+}
+func (baseStatsClient) GetUsersStats(context.Context, *statspb.GetUsersStatsRequest, ...grpc.CallOption) (*statspb.GetUsersStatsResponse, error) {
 	return nil, nil
 }
 
 // mockRoutingClient implements routingpb.RoutingServiceClient with configurable responses.
 type mockRoutingClient struct {
+	baseRoutingClient
 	balancerResp *routingpb.GetBalancerInfoResponse
 	balancerErr  error
 	overrideErr  error
@@ -129,26 +156,11 @@ func (m *mockRoutingClient) OverrideBalancerTarget(_ context.Context, _ *routing
 	return &routingpb.OverrideBalancerTargetResponse{}, nil
 }
 
-func (m *mockRoutingClient) SubscribeRoutingStats(_ context.Context, _ *routingpb.SubscribeRoutingStatsRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
-	return nil, nil
-}
-func (m *mockRoutingClient) TestRoute(_ context.Context, _ *routingpb.TestRouteRequest, _ ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *mockRoutingClient) AddRule(_ context.Context, _ *routingpb.AddRuleRequest, _ ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
-	return nil, nil
-}
-func (m *mockRoutingClient) RemoveRule(_ context.Context, _ *routingpb.RemoveRuleRequest, _ ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *mockRoutingClient) ListRule(_ context.Context, _ *routingpb.ListRuleRequest, _ ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
-	return nil, nil
-}
-
 // MockRoutingClient returns a fixed balancer response with no override (auto mode).
 // --- Error-capable mocks for getCombinedStats tests ---
 
 type mockStatsClientWithError struct {
+	baseStatsClient
 	queryErr error
 	sysErr   error
 }
@@ -169,21 +181,6 @@ func (m *mockStatsClientWithError) GetSysStats(ctx context.Context, in *statspb.
 		return nil, m.sysErr
 	}
 	return &statspb.SysStatsResponse{Uptime: 100, Sys: 50000000, NumGoroutine: 10}, nil
-}
-func (m *mockStatsClientWithError) GetStats(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
-	return nil, nil
-}
-func (m *mockStatsClientWithError) GetStatsOnline(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsResponse, error) {
-	return nil, nil
-}
-func (m *mockStatsClientWithError) GetStatsOnlineIpList(context.Context, *statspb.GetStatsRequest, ...grpc.CallOption) (*statspb.GetStatsOnlineIpListResponse, error) {
-	return nil, nil
-}
-func (m *mockStatsClientWithError) GetAllOnlineUsers(context.Context, *statspb.GetAllOnlineUsersRequest, ...grpc.CallOption) (*statspb.GetAllOnlineUsersResponse, error) {
-	return nil, nil
-}
-func (m *mockStatsClientWithError) GetUsersStats(context.Context, *statspb.GetUsersStatsRequest, ...grpc.CallOption) (*statspb.GetUsersStatsResponse, error) {
-	return nil, nil
 }
 
 type mockObservatoryClientError struct{}
@@ -210,6 +207,7 @@ func (m *mockHandlerClientCustom) ListOutbounds(_ context.Context, _ *handlerpb.
 
 // MockRoutingClientWithInfo returns a balancer response with an override set.
 type MockRoutingClientWithInfo struct {
+	baseRoutingClient
 	override *routingpb.OverrideInfo
 }
 
@@ -221,45 +219,17 @@ func (m *MockRoutingClientWithInfo) GetBalancerInfo(_ context.Context, _ *routin
 func (m *MockRoutingClientWithInfo) OverrideBalancerTarget(_ context.Context, _ *routingpb.OverrideBalancerTargetRequest, _ ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
 	return &routingpb.OverrideBalancerTargetResponse{}, nil
 }
-func (m *MockRoutingClientWithInfo) SubscribeRoutingStats(_ context.Context, _ *routingpb.SubscribeRoutingStatsRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) TestRoute(_ context.Context, _ *routingpb.TestRouteRequest, _ ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) AddRule(_ context.Context, _ *routingpb.AddRuleRequest, _ ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) RemoveRule(_ context.Context, _ *routingpb.RemoveRuleRequest, _ ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientWithInfo) ListRule(_ context.Context, _ *routingpb.ListRuleRequest, _ ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
-	return nil, nil
-}
 
 // MockRoutingClientError always returns an error from GetBalancerInfo.
-type MockRoutingClientError struct{}
+type MockRoutingClientError struct {
+	baseRoutingClient
+}
 
 func (m *MockRoutingClientError) GetBalancerInfo(_ context.Context, _ *routingpb.GetBalancerInfoRequest, _ ...grpc.CallOption) (*routingpb.GetBalancerInfoResponse, error) {
 	return nil, fmt.Errorf("routing unavailable")
 }
 func (m *MockRoutingClientError) OverrideBalancerTarget(_ context.Context, _ *routingpb.OverrideBalancerTargetRequest, _ ...grpc.CallOption) (*routingpb.OverrideBalancerTargetResponse, error) {
 	return nil, fmt.Errorf("routing unavailable")
-}
-func (m *MockRoutingClientError) SubscribeRoutingStats(_ context.Context, _ *routingpb.SubscribeRoutingStatsRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[routingpb.RoutingContext], error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) TestRoute(_ context.Context, _ *routingpb.TestRouteRequest, _ ...grpc.CallOption) (*routingpb.RoutingContext, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) AddRule(_ context.Context, _ *routingpb.AddRuleRequest, _ ...grpc.CallOption) (*routingpb.AddRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) RemoveRule(_ context.Context, _ *routingpb.RemoveRuleRequest, _ ...grpc.CallOption) (*routingpb.RemoveRuleResponse, error) {
-	return nil, nil
-}
-func (m *MockRoutingClientError) ListRule(_ context.Context, _ *routingpb.ListRuleRequest, _ ...grpc.CallOption) (*routingpb.ListRuleResponse, error) {
-	return nil, nil
 }
 
 type mockObservatoryClient struct {
