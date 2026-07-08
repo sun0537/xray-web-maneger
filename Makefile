@@ -55,7 +55,7 @@ frontend:
 	@if [ ! -d frontend/node_modules ]; then \
 		(cd frontend && npm install); \
 	fi
-	(cd frontend && npx @tailwindcss/cli -i ./tailwind.css -o ./style.css --config tailwind.config.js --minify)
+	(cd frontend && npx @tailwindcss/cli -i ./tailwind.css -o ./style.css --minify)
 
 package: frontend \
 	$(RELEASE_DIR)/$(APP_NAME)-$(VERSION)-linux-amd64.tar.gz \
